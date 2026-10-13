@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 确保 gradlew 可执行（Windows 上提交容易丢掉执行位）
+        run: chmod +x gradlew
+
       - name: 安装 JDK 21
         uses: actions/setup-java@v4
         with:
