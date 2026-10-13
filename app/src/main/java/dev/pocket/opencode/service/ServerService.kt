@@ -18,9 +18,12 @@ import kotlinx.coroutines.launch
 /**
  * 前台服务：容器里的 opencode 服务在这个进程生命期内保持运行。
  *
- * 说明：Android 12+ 的「幻影进程杀手」按应用进程数下手，容器里的 node/opencode
- * 子进程也算在内。前台服务 + 单个服务进程是最省的做法；如果设备上装的是
- * Shizuku/adb，可以用 `settings put global settings_enable_monitor_phantom_procs false` 彻底关掉限制。
+ * 注意：服务只在「用户/系统明确要求停止」时自己结束（ACTION_STOP / onDestroy），
+ * 不根据状态流的初始 STOPPED 值自杀——那会在启动瞬间把刚起来的前台服务干掉。
+ *
+ * Android 12+ 的「幻影进程杀手」按应用进程数下手，容器里的 node/opencode 子进程也算在内。
+ * 前台服务 + 单服务进程是最省的做法；如果设备上有 Shizuku/adb，可以用
+ * `settings put global settings_enable_monitor_phantom_procs false` 彻底关掉限制。
  */
 class ServerService : Service() {
 
@@ -34,6 +37,7 @@ class ServerService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_START
+        // 必须在 5 秒内进前台
         startForeground(
             Notifications.ID_SERVER,
             Notifications.serverNotification(
@@ -46,25 +50,23 @@ class ServerService : Service() {
         startObserving()
 
         when (action) {
-            ACTION_STOP -> {
-                scope.launch {
-                    engine.server.stop(engine.settings.snapshot())
-                    releaseWakeLock()
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
+            ACTION_STOP -> scope.launch {
+                engine.server.stop(engine.settings.snapshot())
+                releaseWakeLock()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             }
+
             ACTION_RESTART -> scope.launch {
-                val settings = engine.settings.snapshot()
-                engine.server.stop(settings)
                 acquireWakeLock()
-                engine.server.start(settings)
-            }
-            else -> scope.launch {
                 val settings = engine.settings.snapshot()
+                engine.server.restart(settings)
+            }
+
+            else -> scope.launch {
                 if (engine.server.isAlive()) return@launch
                 acquireWakeLock()
-                engine.server.start(settings)
+                engine.server.start(engine.settings.snapshot())
             }
         }
         return START_STICKY
@@ -99,21 +101,22 @@ class ServerService : Service() {
                         ),
                     )
                 }
-                if (status.phase == ServerPhase.STOPPED && !engine.server.isAlive()) {
-                    releaseWakeLock()
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
+                // 服务在跑就续一把 WakeLock（带超时，避免异常情况下永久持有）
+                if (status.phase == ServerPhase.RUNNING) acquireWakeLock()
             }
         }
     }
 
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
         val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val current = wakeLock
+        if (current?.isHeld == true) {
+            // 续期：先释放再按新超时获取
+            runCatching { current.release() }
+        }
         wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "opencode-pocket:server").apply {
             setReferenceCounted(false)
-            acquire()
+            runCatching { acquire(WAKELOCK_TIMEOUT_MS) }
         }
     }
 
@@ -132,5 +135,8 @@ class ServerService : Service() {
         const val ACTION_START = "dev.pocket.opencode.START"
         const val ACTION_STOP = "dev.pocket.opencode.STOP"
         const val ACTION_RESTART = "dev.pocket.opencode.RESTART"
+
+        /** 单次 WakeLock 最长 60 分钟，服务运行时会自动续期。 */
+        private const val WAKELOCK_TIMEOUT_MS = 60 * 60 * 1000L
     }
 }

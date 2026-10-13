@@ -114,6 +114,18 @@ object MarkdownParser {
             }
         }
 
+        /** 找「单独的」星号作为斜体收尾：它的前后都不能紧挨着星号（避免把 ** 拆开）。 */
+        fun findClosingItalic(from: Int): Int {
+            var index = text.indexOf('*', from)
+            while (index in from until text.length) {
+                val prev = text.getOrNull(index - 1)
+                val next = text.getOrNull(index + 1)
+                if (prev != '*' && next != '*') return index
+                index = text.indexOf('*', index + 1)
+            }
+            return -1
+        }
+
         while (i < text.length) {
             val rest = text.substring(i)
             when {
@@ -177,7 +189,7 @@ object MarkdownParser {
                 }
 
                 rest.startsWith("*") && !rest.startsWith("**") -> {
-                    val end = text.indexOf('*', i + 1)
+                    val end = findClosingItalic(i + 1)
                     if (end > i + 1) {
                         flush()
                         pushStyle(SpanStyle(fontStyle = FontStyle.Italic))

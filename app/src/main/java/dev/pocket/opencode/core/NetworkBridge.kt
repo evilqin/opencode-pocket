@@ -21,27 +21,31 @@ class NetworkBridge(private val context: Context, private val paths: PocketPaths
     private val connectivity: ConnectivityManager? =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
-    /** 当前网络的首选 DNS 服务器（IPv4 优先）。 */
+    /** 当前网络的首选 DNS 服务器（IPv4 优先，去掉 link-local 的 %scope 后缀）。 */
     fun currentDnsServers(): List<String> {
         val result = LinkedHashSet<String>()
         try {
             val manager = connectivity ?: return fallbackDns()
             val active: Network? = manager.activeNetwork
             val properties = active?.let { manager.getLinkProperties(it) }
-            val servers = properties?.dnsServers?.mapNotNull { it.hostAddress }?.filter { it.isNotBlank() }
+            val servers = properties?.dnsServers?.mapNotNull { address ->
+                address.hostAddress?.substringBefore('%')?.takeIf { it.isNotBlank() }
+            }
             if (servers != null) result += servers
             if (result.isEmpty()) {
                 manager.allNetworks.forEach { network ->
                     manager.getLinkProperties(network)?.dnsServers?.forEach { address ->
-                        address.hostAddress?.takeIf { it.isNotBlank() }?.let { result += it }
+                        address.hostAddress?.substringBefore('%')?.takeIf { it.isNotBlank() }?.let { result += it }
                     }
                 }
             }
         } catch (_: Exception) {
         }
         if (result.isEmpty()) result += fallbackDns()
+        // 私人 DNS（DoT）开启时上报的服务器可能不可直连，公共 DNS 作为兜底附在后面
+        result += fallbackDns()
         // 容器里没有 IPv6 路由时优先 IPv4
-        return result.sortedBy { if (it.contains(':')) 1 else 0 }
+        return result.distinct().sortedBy { if (it.contains(':')) 1 else 0 }
     }
 
     private fun fallbackDns(): List<String> = listOf("223.5.5.5", "119.29.29.29", "1.1.1.1")
@@ -69,19 +73,16 @@ class NetworkBridge(private val context: Context, private val paths: PocketPaths
     suspend fun ping(host: String = "mirrors.tuna.tsinghua.edu.cn", timeoutMs: Long = 2500): Long? =
         withContext(Dispatchers.IO) {
             try {
+                val client = downloader.http.newBuilder()
+                    .callTimeout(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .build()
                 val request = Request.Builder().url("https://$host/").head().build()
                 val start = System.currentTimeMillis()
-                downloader.http.newCall(request).execute().use {
+                client.newCall(request).execute().use {
                     System.currentTimeMillis() - start
                 }
             } catch (_: Exception) {
-                try {
-                    val start = System.currentTimeMillis()
-                    InetAddress.getByName(host)
-                    System.currentTimeMillis() - start
-                } catch (_: Exception) {
-                    null
-                }
+                null
             }
         }
 

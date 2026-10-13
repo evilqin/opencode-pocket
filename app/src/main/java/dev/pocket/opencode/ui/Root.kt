@@ -31,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -40,12 +41,49 @@ import dev.pocket.opencode.core.PocketEngine
 import dev.pocket.opencode.core.ServerPhase
 
 sealed interface Route {
-    data object Home : Route
-    data object Chat : Route
-    data object Terminal : Route
-    data object Settings : Route
-    data object Setup : Route
-    data object Web : Route
+    val name: String
+
+    data object Home : Route {
+        override val name = HomeName
+    }
+
+    data object Chat : Route {
+        override val name = ChatName
+    }
+
+    data object Terminal : Route {
+        override val name = TerminalName
+    }
+
+    data object Settings : Route {
+        override val name = SettingsName
+    }
+
+    data object Setup : Route {
+        override val name = SetupName
+    }
+
+    data object Web : Route {
+        override val name = WebName
+    }
+
+    companion object {
+        const val HomeName = "home"
+        const val ChatName = "chat"
+        const val TerminalName = "terminal"
+        const val SettingsName = "settings"
+        const val SetupName = "setup"
+        const val WebName = "web"
+
+        fun fromName(value: String): Route = when (value) {
+            ChatName -> Chat
+            TerminalName -> Terminal
+            SettingsName -> Settings
+            SetupName -> Setup
+            WebName -> Web
+            else -> Home
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -54,33 +92,32 @@ fun PocketRoot(engine: PocketEngine) {
     val settings by engine.settings.settings.collectAsStateWithLifecycle()
     val install by engine.installer.state.collectAsStateWithLifecycle()
     val server by engine.server.status.collectAsStateWithLifecycle()
+    val initialized by engine.initialized.collectAsStateWithLifecycle()
 
-    var route by remember { mutableStateOf<Route>(Route.Home) }
-    var welcomed by remember { mutableStateOf(false) }
-    var autoStartDone by remember { mutableStateOf(false) }
+    // 用字符串保存路由，进程被回收后也能回到原来那一页
+    var routeName by rememberSaveable { mutableStateOf(Route.HomeName) }
+    val route: Route = Route.fromName(routeName)
+    var welcomed by rememberSaveable { mutableStateOf(false) }
+    var autoStartDone by rememberSaveable { mutableStateOf(false) }
 
-    // 首次打开且环境缺失：直接进安装页
-    LaunchedEffect(install.installed) {
-        if (!welcomed && !install.installed) {
-            welcomed = true
-            route = Route.Setup
-        } else {
-            welcomed = true
-        }
+    // 首次打开且环境缺失：直接进安装页（必须等初始化完成，否则默认值会把老用户丢进安装页）
+    LaunchedEffect(initialized, install.installed) {
+        if (!initialized || welcomed) return@LaunchedEffect
+        welcomed = true
+        if (!install.installed) routeName = Route.SetupName
     }
 
-    // 自动启动服务（进入 App 时）
-    LaunchedEffect(install.installed, settings.autoStart) {
-        if (!autoStartDone && install.installed && settings.autoStart &&
-            server.phase == ServerPhase.STOPPED
-        ) {
-            autoStartDone = true
+    // 自动启动服务（进入 App 时）——同样要等设置真正读出来
+    LaunchedEffect(initialized, install.installed, settings.autoStart) {
+        if (!initialized || autoStartDone) return@LaunchedEffect
+        autoStartDone = true
+        if (install.installed && settings.autoStart && server.phase == ServerPhase.STOPPED) {
             engine.startServer()
         }
     }
 
     if (route == Route.Web) {
-        WebScreen(engine) { route = Route.Home }
+        WebScreen(engine) { routeName = Route.HomeName }
         return
     }
 
@@ -136,7 +173,7 @@ fun PocketRoot(engine: PocketEngine) {
                     tabs.forEach { (target, label, icon) ->
                         NavigationBarItem(
                             selected = route == target,
-                            onClick = { route = target },
+                            onClick = { routeName = target.name },
                             icon = { Icon(icon, label) },
                             label = { Text(label, style = MaterialTheme.typography.labelSmall) },
                         )
@@ -157,18 +194,18 @@ fun PocketRoot(engine: PocketEngine) {
                 when (target) {
                     Route.Home -> HomeScreen(
                         engine = engine,
-                        onOpenSetup = { route = Route.Setup },
-                        onOpenWeb = { route = Route.Web },
-                        onOpenTerminal = { route = Route.Terminal },
-                        onOpenSettings = { route = Route.Settings },
+                        onOpenSetup = { routeName = Route.SetupName },
+                        onOpenWeb = { routeName = Route.WebName },
+                        onOpenTerminal = { routeName = Route.TerminalName },
+                        onOpenSettings = { routeName = Route.SettingsName },
                     )
 
-                    Route.Chat -> ChatScreen(engine, onOpenSettings = { route = Route.Settings })
+                    Route.Chat -> ChatScreen(engine, onOpenSettings = { routeName = Route.SettingsName })
                     Route.Terminal -> TerminalScreen(engine)
                     Route.Settings -> SettingsScreen(engine)
                     Route.Setup -> Column {
-                        ScreenTopBar(title = "安装环境", onBack = { route = Route.Home })
-                        SetupScreen(engine) { route = Route.Home }
+                        ScreenTopBar(title = "安装环境", onBack = { routeName = Route.HomeName })
+                        SetupScreen(engine) { routeName = Route.HomeName }
                     }
 
                     Route.Web -> Unit

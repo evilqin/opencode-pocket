@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
@@ -141,7 +142,12 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                                 val ubuntu = engine.repos.speedTestUbuntu(Mirrors.ubuntu)
                                 val node = engine.repos.speedTestNode(Mirrors.node)
                                 val npm = engine.repos.speedTestNpm(Mirrors.npm)
-                                speedResults = (ubuntu + node + npm).associateBy { "${it.mirrorId}@${it.mirrorName}" }
+                                // 用「类型:id」做 key：同一镜像名会同时出现在多个分组里（例如清华同时提供 ubuntu/apt/node/npm）
+                                speedResults = buildMap {
+                                    ubuntu.forEach { put("ubuntu:${it.mirrorId}", it) }
+                                    node.forEach { put("node:${it.mirrorId}", it) }
+                                    npm.forEach { put("npm:${it.mirrorId}", it) }
+                                }
                                 testing = false
                             }
                         },
@@ -160,6 +166,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                 PocketCard {
                     MirrorGroup(
                         title = "Ubuntu rootfs",
+                        kind = "ubuntu",
                         mirrors = Mirrors.ubuntu,
                         selected = settings.ubuntuMirror,
                         speeds = speedResults,
@@ -169,6 +176,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                     Spacer(Modifier.height(14.dp))
                     MirrorGroup(
                         title = "apt 软件源",
+                        kind = "apt",
                         mirrors = Mirrors.apt,
                         selected = settings.aptMirror,
                         speeds = speedResults,
@@ -178,6 +186,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                     Spacer(Modifier.height(14.dp))
                     MirrorGroup(
                         title = "Node.js",
+                        kind = "node",
                         mirrors = Mirrors.node,
                         selected = settings.nodeMirror,
                         speeds = speedResults,
@@ -187,6 +196,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                     Spacer(Modifier.height(14.dp))
                     MirrorGroup(
                         title = "npm registry（OpenCode 下载）",
+                        kind = "npm",
                         mirrors = Mirrors.npm,
                         selected = settings.npmMirror,
                         speeds = speedResults,
@@ -198,19 +208,15 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
         }
 
         item {
-            Column {
-                SectionHeader("安装步骤", "每一步都可以单独重试")
-                Spacer(Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    install.steps.forEach { snapshot ->
-                        StepCard(
-                            snapshot = snapshot,
-                            running = running,
-                            onStart = { scope.launch { engine.installer.reinstall(snapshot.step) } },
-                        )
-                    }
-                }
-            }
+            SectionHeader("安装步骤", "每一步都可以单独重试")
+        }
+
+        items(install.steps, key = { it.step.id }) { snapshot ->
+            StepCard(
+                snapshot = snapshot,
+                running = running,
+                onStart = { scope.launch { engine.installer.reinstall(snapshot.step) } },
+            )
         }
 
         item {
@@ -260,6 +266,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
 @Composable
 private fun MirrorGroup(
     title: String,
+    kind: String,
     mirrors: List<Mirrors.Mirror>,
     selected: String,
     speeds: Map<String, Repos.Speed>,
@@ -274,7 +281,7 @@ private fun MirrorGroup(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             mirrors.forEach { mirror ->
-                val speed = speeds.values.firstOrNull { it.mirrorId == mirror.id && it.mirrorName == mirror.name }
+                val speed = speeds["$kind:${mirror.id}"]
                 val label = buildString {
                     append(mirror.name)
                     when {

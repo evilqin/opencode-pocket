@@ -12,8 +12,8 @@ android {
         applicationId = "dev.pocket.opencode"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         // 只支持 arm64：内置的 proot 运行时与 Ubuntu rootfs 都是 aarch64。
         ndk { abiFilters += "arm64-v8a" }
@@ -71,6 +71,7 @@ android {
     buildFeatures {
         compose = true
         aidl = true
+        buildConfig = true
     }
 
     testOptions {

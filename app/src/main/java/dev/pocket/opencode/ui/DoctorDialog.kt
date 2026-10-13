@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
@@ -93,8 +92,10 @@ fun DoctorDialog(engine: PocketEngine, onDismiss: () -> Unit) {
                     .heightIn(max = 420.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                items(results, key = { it.title + it.detail }) { check ->
-                    DoctorRow(check)
+                // 用下标做 key：检查项可能出现相同标题/详情（例如两条探测都失败），
+                // 用内容做 key 会触发 LazyColumn 的重复 key 崩溃。
+                items(results.size) { index ->
+                    DoctorRow(results[index])
                 }
                 if (running) {
                     item {

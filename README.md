@@ -45,10 +45,10 @@
 2. 手机需要 **ARM64**，Android **11（API 30）及以上**。
 3. 安装后打开 → 「开始安装」→ 选镜像 → 等 5 分钟左右。
 
-> 仓库里的 `dist/` 放了三份构建产物：
-> `*-arm64.apk`（标准包，27.9 MB，未混淆，最稳）、
-> `*-arm64-slim.apk`（R8 精简包，**4.07 MB**，体积小但需要真机回归一遍）、
-> `*-debug.apk`（调试包，37 MB，日志最全）。
+> 仓库里的 `dist/` 放了三份构建产物（当前 1.1.0）：
+> `*-arm64.apk`（标准包，28.1 MB，未混淆，最稳）、
+> `*-arm64-slim.apk`（R8 精简包，**4.1 MB**，体积小但需要真机回归一遍）、
+> `*-debug.apk`（调试包，36.5 MB，日志最全）。
 
 ### 方式二：自己构建
 
@@ -59,7 +59,7 @@ git clone <this-repo> && cd opencode-pocket
 node tools/fetch-boot-runtime.mjs
 
 # 2) 单元测试 + 构建
-./gradlew :app:testDebugUnitTest    # 41 个纯逻辑用例（解析 / 配置 / 版本 / Markdown / 格式化）
+./gradlew :app:testDebugUnitTest    # 50 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
 ./gradlew :app:assembleDebug        # 产物：app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assembleRelease      # 默认用 debug 签名，可直接安装
 
@@ -137,8 +137,12 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 - **不给系统添乱**：`--kill-on-exit` 保证 proot 一死带走整棵进程树；停止时再补一次
   `pkill -9 -f opencode` 兜底。
 - **设备 Shell 桥**：Android 10+ 的普通应用既没有 shell 身份也不能执行系统命令，所以走 Shizuku 的
-  「用户服务」：把 `IDeviceShellService.aidl` 编译出的实现类交给 Shizuku，在它的 shell/root 进程里跑，
-  App 只通过 Binder 调用；容器里则由 `dexec`（curl + 随机 token）打到 `127.0.0.1:3090` 的本地 HTTP 桥。
+  「用户服务」：Shizuku 会把我们 APK 里的 `DeviceShellUserService`（**必须继承 AIDL 生成的 `Stub`**，
+  并实现保留事务 `destroy() = 16777114`）加载到它的 shell/root 进程里，App 只通过 Binder 调用；
+  容器里则由 `dexec`（curl + 随机 token + `X-Dexec-Timeout-Ms`）打到 `127.0.0.1:3090` 的本地 HTTP 桥。
+- **文件安全**：tar 解压前校验条目名与**父目录真实路径**（防「软链逃逸」），硬链接源同样清洗；
+  大文件下载尽量接上上游摘要（Ubuntu `SHA256SUMS` / Node `SHASUMS256.txt` / npm `dist.shasum`）；
+  删除与体积统计一律不跟随符号链接（rootfs 里有 `var/run -> /run` 这类绝对链接）。
 
 ---
 
@@ -146,13 +150,17 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 开发机上已经实际构建并通过以下检查（Windows + JDK 25 + Gradle 9.5 + AGP 9.3.3）：
 
-- **41 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
+- **41 → 50 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
   `opencode.json` 生成、环境变量映射、版本比较（含 `24.04.10 > 24.04.9` 这种坑）、
+  **上游文件解析（Node index.json 的 `files` 字段、Ubuntu 目录列表、SHA256SUMS 文本）**、
   Markdown 解析、格式化输出；
-- `assembleDebug` / `assembleRelease` 均通过：**37 MB / 27.9 MB**；R8 精简版 **4.07 MB**；
-- 打包自检（`tools/verify-apk.mjs`）：4 个内置 ELF 与 `jniLibs` **逐字节一致**（proot 的入口点没有被
-  strip 改写）、只含 `arm64-v8a`、容器脚本齐全、合并后 manifest 为 `extractNativeLibs=true`、
-  前台服务类型为 `specialUse`、`DeviceShellUserService` / `ShizukuProvider` 都在、release 包签名为可直装的 debug key；
+- **打包自检**（`tools/verify-apk.mjs`）：4 个内置 ELF 与 `jniLibs` **逐字节一致**（proot 的入口点没有被
+  strip 改写）、只含 `arm64-v8a`、容器脚本齐全；有 aapt2 时进一步核对合并后的 manifest
+  （`extractNativeLibs=true`、前台服务类型 `specialUse`、各组件名）；并直接在 dex 里确认
+  `DeviceShellUserService` / `IDeviceShellService` 存在（R8 精简包尤其关键）；
+- **镜像源体检**（`tools/mirror-check.mjs`）：25 个镜像端点全部用真实请求验证过，
+  验证不通过的（sjtu 的 ubuntu-cdimage、ustc 的 nodejs-release、tuna 的 npm）已从列表移除，
+  另外补了 cernet / zju / bfsu / tencent 等可用源；
 - 内置运行时全部来自 Termux 官方仓库（proot 5.1.107.96 / libtalloc 2.5.0 / libandroid-shmem 0.7），
   `tools/fetch-boot-runtime.mjs` 会校验 sha256 并写入 `jniLibs/boot-runtime.json`。
 
@@ -162,6 +170,30 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 - Shizuku 用户服务（`dexec`）的绑定与执行；
 - 各家 ROM 的省电策略与 Android 12+ 幻影进程限制；
 - R8 精简包的功能回归（所以默认发布的还是未混淆版本）。
+
+## 1.1.0 修复记录
+
+这一轮做了一次全量审查（容器层 / UI 层 / 服务与协议层三路并行），修掉的问题按严重度列几个代表性的：
+
+| 严重度 | 问题 | 修复 |
+| --- | --- | --- |
+| P0 | 断点续传用 `RandomAccessFile(part, "r")` 打开后写入，续传必然失败 | 改成 `"rw"`，并校验 `Content-Range` 起点 |
+| P0 | Shizuku 用户服务写成了 `android.app.Service`，Shizuku 只接受 AIDL `Stub` | 改为继承 `IDeviceShellService.Stub`，补上保留事务 `destroy() = 16777114` |
+| P0 | 容器配置探测路径漏了 `root/`，装完重启就回到「未安装」 | 统一用 `Guest.OPENCODE_CONFIG`（= `/root/.config/...`）推导宿主路径 |
+| P0 | 取消安装后立刻再点安装会起两套流水线同时删/解压同一 rootfs | 取消改为「请求 + 等旧任务真正结束」；下载与解压都带取消检查点 |
+| P0 | 前台服务收集到状态流的初始 STOPPED 就 `stopSelf()`，刚起来就自杀 | 只由 `ACTION_STOP` 停止服务 |
+| P1 | 命令超时/取消靠 `withTimeout`，拦不住阻塞的 `readLine`；且 stdin 永不关闭 → `dpkg`/`cat` 永久挂死 | 看门狗杀进程 + 立刻关闭子进程 stdin + 输出环形缓冲 |
+| P1 | 安装失败后 `refresh()` 把 FAILED 与错误原因抹掉，用户「看不到发生了什么」 | 失败状态与错误文本落盘并在刷新时保留 |
+| P1 | rootfs 先删后解压，中途失败会毁掉可用环境；下载包在自检前就删了 | 解压到 `ubuntu.new` 再原子替换；自检通过后才删下载包 |
+| P1 | tar 里软链/硬链的目标没校验，恶意 tarball 可以写出沙箱 | 父目录真实路径必须在目标树内，否则跳过并计数 |
+| P1 | 下载不做摘要校验 | 接上 Ubuntu `SHA256SUMS`、Node `SHASUMS256.txt`、npm `dist.shasum`（拿不到时降级为仅 HTTPS） |
+| P1 | 自写 HTTP 桥按**字符**读 `Content-Length`，中文命令会卡 15 秒后空响应 | 改为按字节读 + 整体 UTF-8 解码，并处理 `Expect: 100-continue` |
+| P1 | 设备桥改端口不重建监听；并发 sync 会把可用状态写成禁用 | 记录真实监听端口，变更即重建；`syncNow()` 加互斥锁 |
+| P1 | `pkill -9 -f opencode` 会匹配到自己；健康检查超时不清理进程 | 用 `[o]pencode` 模式；超时后杀进程并复位状态 |
+| P1 | 首页每秒重组、工作区解析在主线程、导出日志读写在主线程（ANR 风险） | 全部挪到 IO 线程 / 仅在服务运行时刷新 |
+| P1 | 对话页：连点发送丢草稿、权限回复失败不回滚、`session.error` 串会话、SSE 空闲 30 秒被自己掐断 | 同步抢锁 + 失败回滚 + 会话过滤 + SSE 关闭读超时（重连后自动补拉历史） |
+| P2 | 镜像里 Node 的 arm64 判定写错（`files` 是平台标识不是文件名）→ Node 步骤必失败 | 改为匹配 `linux-arm64`，并加单测锁住 |
+| P2 | `deleteRecursively()` / `walkTopDown()` 会跟随符号链接（rootfs 里有 `var/run -> /run`） | 新增 `FileOps`：删除/统计都不跟随链接 |
 
 任何一步失败时：安装页会显示该步的错误与可重试按钮，「终端 → 安装日志 / 运行日志」有完整输出。
 
@@ -215,20 +247,21 @@ dexec 'pm list packages | grep 星'  # 找应用
 ```
 app/src/main/java/dev/pocket/opencode/
 ├── core/            容器与安装：PocketPaths Proot GuestShell Installer Repos Downloader
-│                    TarExtract ServerController NetworkBridge OpencodeConfig SettingsStore
-│                    Doctor（一键体检） Versions
-│                    ShizukuBridge + DeviceShellManager（设备 Shell 桥）
+│                    TarExtract FileOps（不跟随软链的删除/统计） ServerController NetworkBridge
+│                    OpencodeConfig SettingsStore Versions UpstreamParsers（纯解析，有单测）
+│                    Doctor（一键体检） ShizukuBridge + DeviceShellManager（设备 Shell 桥）
 ├── data/            服务端类型与 REST/SSE 客户端
-├── service/         前台服务与通知 + DeviceShellServer（本地 HTTP 桥）+ DeviceShellUserService（Shizuku 侧）
+├── service/         前台服务与通知 + DeviceShellServer（本地 HTTP 桥）+ DeviceShellUserService（Shizuku 侧 Stub）
 ├── ui/              Compose 界面：Home / Setup / Chat / Terminal / Web / Settings / Doctor + 自绘图标
 └── util/
 
-app/src/main/aidl/            Shizuku 用户服务的 Binder 接口
+app/src/main/aidl/            Shizuku 用户服务的 Binder 接口（含 destroy 保留事务）
 app/src/main/assets/scripts/  容器内执行的 shell 脚本（apt、工具、收尾）
 app/src/main/assets/device-shell/  dexec 命令与 device-shell 技能模板
-app/src/test/                 41 个 JVM 单元测试（解析 / 配置 / 版本 / Markdown / 格式化）
+app/src/test/                 50 个 JVM 单元测试（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
 tools/fetch-boot-runtime.mjs  拉取 Termux 官方 proot 运行时并校验，落到 jniLibs
-tools/verify-apk.mjs          打包自检：内置 ELF 是否被改、ABI、容器脚本
+tools/verify-apk.mjs          打包自检：内置 ELF 是否被改、ABI、容器脚本、manifest、Shizuku 类
+tools/mirror-check.mjs        镜像源体检：25 个端点用真实请求逐个验证
 ```
 
 ## 第三方组件与许可

@@ -10,8 +10,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import dev.pocket.opencode.ui.PocketRoot
 import dev.pocket.opencode.ui.theme.PocketTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -37,10 +39,16 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            !dev.pocket.opencode.util.DevicePermissions.hasNotificationPermission(this)
-        ) {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        // 通知权限只主动申请一次；之后用户可以在首页 Banner 里自己去开
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            lifecycleScope.launch {
+                if (!dev.pocket.opencode.util.DevicePermissions.hasNotificationPermission(this@MainActivity)) {
+                    if (!engine.settings.snapshot().notificationAsked) {
+                        engine.settings.update { it.copy(notificationAsked = true) }
+                        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                }
+            }
         }
     }
 }

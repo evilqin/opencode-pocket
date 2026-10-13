@@ -1,12 +1,15 @@
 package dev.pocket.opencode.core
 
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Request
-import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -15,14 +18,18 @@ import org.json.JSONObject
  *   - Node.js LTS 版本（读 index.json）
  *   - opencode 版本（读 npm registry）
  *   - 多镜像并行测速（真实文件 + Range 请求，测得就是真实带宽）
+ *
+ * 所有解析都走 [UpstreamParsers]（纯函数、有单测），这里只负责网络与并发。
  */
-class Repos(private val downloader: Downloader) {
+class Repos(private val downloads: Downloader) {
 
     data class Artifact(
         val url: String,
         val fileName: String,
         val version: String,
         val size: Long = -1,
+        /** 上游发布的摘要（Ubuntu 的 SHA256SUMS / Node 的 SHASUMS256.txt），拿不到就是 null。 */
+        val sha256: String? = null,
     )
 
     data class Speed(
@@ -36,74 +43,69 @@ class Repos(private val downloader: Downloader) {
         val ok: Boolean get() = bytesPerSecond != null && bytesPerSecond > 0
     }
 
+    /** 测速并发上限：19 个镜像同时拉 900 KB 会把移动网络打爆。 */
+    private val speedGate = Semaphore(4)
+
     // ------------------------------------------------------------------ Ubuntu
 
-    private val ubuntuFallbackVersions = listOf("24.04.3", "24.04.2", "24.04.1")
+    private val ubuntuFallbackVersions = listOf("24.04.5", "24.04.4", "24.04.3", "24.04.2", "24.04.1")
 
     suspend fun ubuntuBase(mirror: Mirrors.Mirror): Artifact = withContext(Dispatchers.IO) {
-        val listing = try {
-            httpGetText(mirror.base + "/")
-        } catch (_: Exception) {
-            null
-        }
-        val pattern = Regex("ubuntu-base-(\\d+\\.\\d+\\.\\d+)-base-arm64\\.tar\\.gz")
-        // 按数字比较版本号（字符串比较会把 24.04.10 排在 24.04.9 前面）
-        val found = listing?.let { html ->
-            pattern.findAll(html).map { it.groupValues[1] to it.value }
-                .distinctBy { it.second }
-                .maxByOrNull { Versions.score(it.first) }
-        }
-        if (found != null) {
-            val url = mirror.base + "/" + found.second
-            return@withContext Artifact(url, found.second, found.first, sizeOf(url))
+        val listing = runCatching { httpGetText(mirror.base + "/") }.getOrNull()
+        val fileName = listing?.let { UpstreamParsers.pickUbuntuBase(it) }
+        if (fileName != null) {
+            val url = mirror.base + "/" + fileName
+            return@withContext Artifact(
+                url = url,
+                fileName = fileName,
+                version = Regex("ubuntu-base-(\\d+\\.\\d+\\.\\d+)-").find(fileName)?.groupValues?.get(1) ?: "",
+                size = sizeOf(url),
+                sha256 = ubuntuSha256(mirror, fileName),
+            )
         }
         for (version in ubuntuFallbackVersions) {
-            val fileName = "ubuntu-base-$version-base-arm64.tar.gz"
-            val url = mirror.base + "/" + fileName
+            val fallback = "ubuntu-base-$version-base-arm64.tar.gz"
+            val url = mirror.base + "/" + fallback
             val size = sizeOf(url)
-            if (size > 0) return@withContext Artifact(url, fileName, version, size)
+            if (size > 0) {
+                return@withContext Artifact(url, fallback, version, size, ubuntuSha256(mirror, fallback))
+            }
         }
         throw IllegalStateException("镜像 ${mirror.name} 上找不到 ubuntu-base 24.04 arm64")
     }
+
+    /** Ubuntu 官方/镜像目录里的 SHA256SUMS。 */
+    private fun ubuntuSha256(mirror: Mirrors.Mirror, fileName: String): String? = runCatching {
+        UpstreamParsers.sha256For(fileName, httpGetText(mirror.base + "/SHA256SUMS"))
+    }.getOrNull()
 
     // ------------------------------------------------------------------ Node
 
     suspend fun nodeLts(mirror: Mirrors.Mirror): Artifact = withContext(Dispatchers.IO) {
         val index = httpGetText(mirror.base + "/index.json")
-        val array = JSONArray(index)
-        var best: JSONObject? = null
-        for (i in 0 until array.length()) {
-            val entry = array.optJSONObject(i) ?: continue
-            val lts = entry.opt("lts")
-            val isLts = lts != null && lts != false && !"false".equals(lts.toString(), true)
-            if (!isLts) continue
-            val files = entry.optJSONArray("files") ?: continue
-            val hasArm64 = (0 until files.length()).any {
-                files.optString(it).contains("linux-arm64.tar.xz")
-            }
-            if (!hasArm64) continue
-            val version = entry.optString("version")
-            if (best == null || Versions.compare(version, best.optString("version")) > 0) best = entry
-        }
-        val selected = best ?: throw IllegalStateException("镜像 ${mirror.name} 的 index.json 里没有 arm64 LTS")
-        val version = selected.optString("version")
-        val fileName = "node-$version-linux-arm64.tar.xz"
-        Artifact("${mirror.base}/$version/$fileName", fileName, version, sizeOf("${mirror.base}/$version/$fileName"))
+        val pick = UpstreamParsers.pickNodeLts(index)
+            ?: throw IllegalStateException("镜像 ${mirror.name} 的 index.json 里没有带 arm64 的 LTS")
+        val fileName = "node-${pick.version}-linux-arm64.tar.xz"
+        val url = "${mirror.base}/${pick.version}/$fileName"
+        Artifact(
+            url = url,
+            fileName = fileName,
+            version = pick.version,
+            size = sizeOf(url),
+            sha256 = nodeSha256(mirror, pick.version, fileName),
+        )
     }
 
-    /** 单独取某个 Node 版本（用于“已装版本/更新”判断）。 */
-    suspend fun nodeArtifact(mirror: Mirrors.Mirror, version: String): Artifact {
-        val fileName = "node-$version-linux-arm64.tar.xz"
-        val url = "${mirror.base}/$version/$fileName"
-        return Artifact(url, fileName, version, sizeOf(url))
-    }
+    /** Node 每个版本目录里的 SHASUMS256.txt。 */
+    private fun nodeSha256(mirror: Mirrors.Mirror, version: String, fileName: String): String? = runCatching {
+        UpstreamParsers.sha256For(fileName, httpGetText("${mirror.base}/$version/SHASUMS256.txt"))
+    }.getOrNull()
 
     // --------------------------------------------------------------- opencode
 
     suspend fun opencodeVersion(registry: String): String = withContext(Dispatchers.IO) {
         val text = httpGetText("$registry/opencode-ai/latest")
-        val json = JSONObject(text)
-        json.optString("version").ifBlank { throw IllegalStateException("registry 没有返回版本号") }
+        JSONObject(text).optString("version").ifBlank { throw IllegalStateException("registry 没有返回版本号") }
     }
 
     fun opencodeTarball(registry: String, version: String): Artifact {
@@ -111,45 +113,48 @@ class Repos(private val downloader: Downloader) {
         return Artifact("$registry/opencode-linux-arm64/-/$fileName", fileName, version)
     }
 
+    /** npm 的 packument 里带 `dist.shasum`（sha1），用于校验 tarball。 */
+    suspend fun opencodeSha1(registry: String, version: String): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val text = httpGetText("$registry/opencode-linux-arm64/$version")
+            JSONObject(text).optJSONObject("dist")?.optString("shasum")?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
+        }.getOrNull()
+    }
+
     // ------------------------------------------------------------------ 测速
 
-    suspend fun speedTestUbuntu(mirrors: List<Mirrors.Mirror>): List<Speed> = coroutineScope {
-        mirrors.map { mirror ->
-            async {
-                try {
-                    val artifact = ubuntuBase(mirror)
-                    measure(mirror, artifact.url)
-                } catch (error: Exception) {
-                    Speed(mirror.id, mirror.name, null, null, null, error.message)
-                }
-            }
-        }.map { it.await() }
-    }
+    suspend fun speedTestUbuntu(mirrors: List<Mirrors.Mirror>): List<Speed> =
+        speedTest(mirrors) { ubuntuBase(it).url }
 
-    suspend fun speedTestNode(mirrors: List<Mirrors.Mirror>): List<Speed> = coroutineScope {
-        mirrors.map { mirror ->
-            async {
-                try {
-                    val artifact = nodeLts(mirror)
-                    measure(mirror, artifact.url)
-                } catch (error: Exception) {
-                    Speed(mirror.id, mirror.name, null, null, null, error.message)
-                }
-            }
-        }.map { it.await() }
-    }
+    suspend fun speedTestNode(mirrors: List<Mirrors.Mirror>): List<Speed> =
+        speedTest(mirrors) { nodeLts(it).url }
 
-    suspend fun speedTestNpm(mirrors: List<Mirrors.Mirror>): List<Speed> = coroutineScope {
-        mirrors.map { mirror ->
-            async {
-                try {
-                    val version = opencodeVersion(mirror.base)
-                    measure(mirror, opencodeTarball(mirror.base, version).url)
-                } catch (error: Exception) {
-                    Speed(mirror.id, mirror.name, null, null, null, error.message)
+    suspend fun speedTestNpm(mirrors: List<Mirrors.Mirror>): List<Speed> =
+        speedTest(mirrors) { mirror ->
+            val version = opencodeVersion(mirror.base)
+            opencodeTarball(mirror.base, version).url
+        }
+
+    private suspend fun speedTest(
+        mirrors: List<Mirrors.Mirror>,
+        resolve: suspend (Mirrors.Mirror) -> String,
+    ): List<Speed> = coroutineScope {
+        mirrors
+            .map { mirror ->
+                async {
+                    speedGate.withPermit {
+                        try {
+                            val url = resolve(mirror)
+                            measure(mirror, url)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            Speed(mirror.id, mirror.name, null, null, null, error.message)
+                        }
+                    }
                 }
             }
-        }.map { it.await() }
+            .awaitAll()
     }
 
     /** 用 Range 拉一小段真实文件，得到“首字节延迟 + 带宽”。 */
@@ -159,12 +164,13 @@ class Repos(private val downloader: Downloader) {
             val request = Request.Builder()
                 .url(url)
                 .header("Range", "bytes=0-${sampleBytes - 1}")
+                .header("Accept-Encoding", "identity")
                 .header("User-Agent", Downloader.USER_AGENT)
                 .build()
             val startNs = System.nanoTime()
             var firstByteNs = 0L
             var total = 0L
-            downloader.http.newCall(request).execute().use { response ->
+            downloads.http.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code}")
                 val stream = response.body?.byteStream() ?: throw IllegalStateException("空响应")
                 val buffer = ByteArray(64 * 1024)
@@ -180,6 +186,8 @@ class Repos(private val downloader: Downloader) {
             val transferMs = ((System.nanoTime() - firstByteNs) / 1_000_000).coerceAtLeast(1)
             val latency = if (firstByteNs > 0) (firstByteNs - startNs) / 1_000_000 else elapsedMs
             Speed(mirror.id, mirror.name, latency, total * 1000L / transferMs, url)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             Speed(mirror.id, mirror.name, null, null, url, error.message)
         }
@@ -187,9 +195,29 @@ class Repos(private val downloader: Downloader) {
 
     // ------------------------------------------------------------------ utils
 
+    /** 文件大小：先 HEAD，失败退化成 Range GET（有些 CDN 不允许 HEAD）。 */
     private fun sizeOf(url: String): Long = try {
-        downloader.http.newCall(Request.Builder().url(url).head().build()).execute().use { response ->
-            response.header("Content-Length")?.toLongOrNull() ?: -1L
+        downloads.http.newCall(Request.Builder().url(url).head().build()).execute().use { response ->
+            val length = response.header("Content-Length")?.toLongOrNull()
+            when {
+                response.isSuccessful && length != null -> length
+                response.isSuccessful -> -1L
+                else -> rangeSize(url)
+            }
+        }
+    } catch (_: Exception) {
+        rangeSize(url)
+    }
+
+    private fun rangeSize(url: String): Long = try {
+        val request = Request.Builder()
+            .url(url)
+            .header("Range", "bytes=0-0")
+            .header("Accept-Encoding", "identity")
+            .build()
+        downloads.http.newCall(request).execute().use { response ->
+            // Content-Range: bytes 0-0/12345678
+            response.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1L
         }
     } catch (_: Exception) {
         -1L
@@ -198,11 +226,15 @@ class Repos(private val downloader: Downloader) {
     private fun httpGetText(url: String): String {
         val request = Request.Builder()
             .url(url)
+            .header("Accept-Encoding", "identity")
             .header("User-Agent", Downloader.USER_AGENT)
             .build()
-        downloader.http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code} @ $url")
-            return response.body?.string() ?: throw IllegalStateException("空响应 @ $url")
-        }
+        return downloads.http.newBuilder()
+            .callTimeout(30, TimeUnit.SECONDS)
+            .build()
+            .newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code} @ $url")
+                response.body?.string() ?: throw IllegalStateException("空响应 @ $url")
+            }
     }
 }

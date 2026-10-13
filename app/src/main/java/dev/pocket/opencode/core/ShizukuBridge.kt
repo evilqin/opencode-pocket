@@ -5,10 +5,13 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
+import dev.pocket.opencode.BuildConfig
 import dev.pocket.opencode.IDeviceShellService
 import dev.pocket.opencode.service.DeviceShellUserService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
@@ -16,11 +19,13 @@ import rikka.shizuku.Shizuku
 /**
  * Shizuku 封装：让**手机本体**（而不是容器）以 shell / root 身份执行命令。
  *
- * 为什么不是一个 `Runtime.exec`：Android 10+ 起普通应用既没有权限，
- * 也拿不到 shell 身份。Shizuku 的做法是把我们的实现类加载到它的
- * shell/root 进程里，通过 Binder 调用 —— 也就是下面这个「用户服务」。
+ * 原理：Shizuku 会把我们 APK 里的 `DeviceShellUserService`（一个 AIDL Stub）
+ * 加载到它自己的 shell/root 进程里，App 通过 Binder 调它的 `exec`。
  *
- * 所有 Shizuku 调用都可能因为 binder 掉线而抛异常，这里一律包起来，失败即视为不可用。
+ * 注意点：
+ *   - 服务标识用 `tag`（类名会被 R8 改写）；`version` 用 versionCode，
+ *     版本不匹配时 Shizuku 会自己重启服务进程；
+ *   - 所有 Shizuku 调用都可能因为 binder 掉线而抛异常，一律包起来，失败即视为不可用。
  */
 class ShizukuBridge(private val context: Context) {
 
@@ -31,9 +36,25 @@ class ShizukuBridge(private val context: Context) {
         val timedOut: Boolean = false,
     )
 
+    @Volatile
     private var service: IDeviceShellService? = null
-    private var connection: ServiceConnection? = null
+
+    @Volatile
     private var uid: Int? = null
+
+    @Volatile
+    private var connection: ServiceConnection? = null
+
+    private val connectLock = Mutex()
+
+    private fun serviceArgs(): Shizuku.UserServiceArgs = Shizuku.UserServiceArgs(
+        ComponentName(context.packageName, DeviceShellUserService::class.java.name),
+    )
+        .daemon(false)
+        .tag(SERVICE_TAG)
+        .processNameSuffix("device_shell")
+        .version(BuildConfig.VERSION_CODE)
+        .debuggable(false)
 
     /** Shizuku（或 Sui）是否在运行。 */
     fun available(): Boolean = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
@@ -42,7 +63,8 @@ class ShizukuBridge(private val context: Context) {
         available() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
     }.getOrDefault(false)
 
-    /** 已经拒绝且勾了「不再询问」。 */
+    /** 已经拒绝并且勾了「不再询问」。
+     *  注意 Shizuku 的这个 API 语义与 Android 的相反：true = 用户选过「拒绝且不再询问」。 */
     fun deniedForever(): Boolean = runCatching {
         available() && Shizuku.shouldShowRequestPermissionRationale()
     }.getOrDefault(false)
@@ -61,50 +83,42 @@ class ShizukuBridge(private val context: Context) {
 
     fun connected(): Boolean = service != null
 
-    /**
-     * 绑定 Shizuku 用户服务（幂等）。返回是否可用。
-     */
-    suspend fun connect(timeoutMs: Long = 8_000): Boolean = withContext(Dispatchers.IO) {
-        if (service != null) return@withContext true
-        if (!permissionGranted()) return@withContext false
+    /** 绑定 Shizuku 用户服务（幂等、可并发调用）。返回是否可用。 */
+    suspend fun connect(timeoutMs: Long = 8_000): Boolean = connectLock.withLock {
+        if (service != null) return@withLock true
+        if (!permissionGranted()) return@withLock false
+        withContext(Dispatchers.IO) {
+            val serviceConnection = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                    val stub = binder?.let { IDeviceShellService.Stub.asInterface(it) }
+                    service = stub
+                    uid = runCatching { stub?.uid }.getOrNull()
+                }
 
-        val args = Shizuku.UserServiceArgs(
-            ComponentName(context.packageName, DeviceShellUserService::class.java.name),
-        )
-            .daemon(false)
-            .version(1)
-            .processNameSuffix("device_shell")
-            .debuggable(false)
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    service = null
+                    uid = null
+                }
+            }
+            connection = serviceConnection
 
-        val serviceConnection = object : ServiceConnection {
-            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-                service = binder?.let { IDeviceShellService.Stub.asInterface(it) }
-                uid = runCatching { service?.uid }.getOrNull()
+            val bound = runCatching {
+                Shizuku.bindUserService(serviceArgs(), serviceConnection)
+                true
+            }.getOrDefault(false)
+            if (!bound) {
+                connection = null
+                return@withContext false
             }
 
-            override fun onServiceDisconnected(name: ComponentName?) {
-                service = null
-                uid = null
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (service != null) return@withContext true
+                delay(120)
             }
+            disconnect()
+            false
         }
-        connection = serviceConnection
-
-        val bound = runCatching {
-            Shizuku.bindUserService(args, serviceConnection)
-            true
-        }.getOrDefault(false)
-        if (!bound) {
-            connection = null
-            return@withContext false
-        }
-
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            if (service != null) return@withContext true
-            delay(120)
-        }
-        disconnect()
-        false
     }
 
     fun disconnect() {
@@ -112,22 +126,14 @@ class ShizukuBridge(private val context: Context) {
         connection = null
         service = null
         uid = null
-        runCatching {
-            Shizuku.unbindUserService(
-                Shizuku.UserServiceArgs(
-                    ComponentName(context.packageName, DeviceShellUserService::class.java.name),
-                ).daemon(false).version(1).processNameSuffix("device_shell").debuggable(false),
-                current,
-                true,
-            )
-        }
+        runCatching { Shizuku.unbindUserService(serviceArgs(), current, true) }
     }
 
     /** 当前身份（2000=shell / 0=root），拿不到返回 null。 */
     suspend fun identity(): String? {
         if (!connect()) return null
-        val current = uid ?: return null
-        return when (current) {
+        return when (val current = uid) {
+            null -> "unknown"
             0 -> "root"
             2000 -> "shell"
             else -> "uid=$current"
@@ -144,7 +150,9 @@ class ShizukuBridge(private val context: Context) {
         val raw = try {
             target.exec(command, timeoutMs.toInt())
         } catch (error: Throwable) {
-            service = null // binder 可能掉了，下一次调用重新绑定
+            // binder 可能掉了：清掉引用，下一次调用重新绑定
+            service = null
+            uid = null
             return@withContext Result(-1, "", "Shizuku 调用失败：${error.message}")
         }
         val json = runCatching { JSONObject(raw) }.getOrNull()
@@ -155,5 +163,10 @@ class ShizukuBridge(private val context: Context) {
             stderr = json.optString("stderr"),
             timedOut = json.optBoolean("timedOut", false),
         )
+    }
+
+    private companion object {
+        /** 固定 tag：类名可能被 R8 改写，用 tag 做服务标识更稳。 */
+        const val SERVICE_TAG = "device_shell"
     }
 }

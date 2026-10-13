@@ -61,12 +61,23 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
     var webView by remember { mutableStateOf<WebView?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
 
-    BackHandler { onBack() }
+    BackHandler {
+        val view = webView
+        if (view?.canGoBack() == true) view.goBack() else onBack()
+    }
 
     // 只在用户点刷新 / 重试时 reload 一次
     LaunchedEffect(reloadToken) {
         if (reloadToken > 0) {
             webView?.reload()
+        }
+    }
+
+    // 端口变了（改设置后重启服务）：让 WebView 指向新地址
+    val pageUrl = "http://127.0.0.1:${server.port}/"
+    LaunchedEffect(pageUrl) {
+        if (reloadToken > 0 || server.phase == ServerPhase.RUNNING) {
+            webView?.loadUrl(pageUrl)
         }
     }
 
@@ -195,11 +206,17 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                                         progress = newProgress
                                     }
                                 }
-                                loadUrl("http://127.0.0.1:${server.port}/")
+                                loadUrl(pageUrl)
                             }
                         },
                         update = { _ ->
-                            // 页面本身的刷新走 reloadToken 的 LaunchedEffect
+                            // 地址变化由 pageUrl 的 LaunchedEffect 处理
+                        },
+                        onRelease = { view ->
+                            webView = null
+                            view.stopLoading()
+                            view.loadUrl("about:blank")
+                            view.destroy()
                         },
                     )
                     if (failed != null) {

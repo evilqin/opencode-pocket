@@ -69,10 +69,12 @@ class PocketPaths(context: Context) {
         const val ROOT = "/root"
         const val WORKSPACE = "/root/workspace"
         const val OPENCODE_CONFIG = "/root/.config/opencode/opencode.json"
+        const val OPENCODE_SKILLS = "/root/.config/opencode/skills"
         const val PROFILE = "/etc/profile.d/90-pocket.sh"
         const val APT_SOURCES = "/etc/apt/sources.list"
         const val RESOLV = "/etc/resolv.conf"
-        const val OPENCODE_BIN = "/usr/local/lib/opencode/opencode"
+        /** 可执行文件真实位置（由 npm 包 bin/opencode 解压而来）。 */
+        const val OPENCODE_BIN = "/usr/local/lib/opencode/bin/opencode"
         const val BIN_LINK = "/usr/local/bin/opencode"
     }
 

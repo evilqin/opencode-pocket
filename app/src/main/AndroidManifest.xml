@@ -49,10 +49,8 @@
                 android:value="运行内置 Linux 容器中的 opencode 服务器，保持长连接与流式响应。" />
         </service>
 
-        <!-- Shizuku 用户服务：由 Shizuku 在 shell/root 进程里加载，用于设备 Shell 桥 -->
-        <service
-            android:name=".service.DeviceShellUserService"
-            android:exported="false" />
+        <!-- Shizuku 用户服务是 AIDL Stub（不是 Service）：由 Shizuku 从 APK 里按类名加载，
+             因此不需要（也不能）在这里声明成 <service> -->
 
         <provider
             android:name="androidx.core.content.FileProvider"

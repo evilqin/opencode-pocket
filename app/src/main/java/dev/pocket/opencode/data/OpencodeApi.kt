@@ -2,6 +2,7 @@ package dev.pocket.opencode.data
 
 import dev.pocket.opencode.core.Downloader
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -32,6 +33,12 @@ class OpencodeApi(
         .callTimeout(30, TimeUnit.SECONDS)
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    /** SSE 专用：不能有读/调用超时，否则空闲 30 秒就会被我们自己掐断重连。 */
+    private val sseClient: OkHttpClient = downloads.http.newBuilder()
+        .callTimeout(0, TimeUnit.MILLISECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
     private val jsonType = "application/json; charset=utf-8".toMediaType()
@@ -175,8 +182,12 @@ class OpencodeApi(
     /**
      * SSE 事件流：断线自动重连，直到收集方取消。
      * 返回的是原始 JSON（`{type, properties}`），由上层解释。
+     *
+     * 重连成功后会额外发一条 `{"type":"resync"}`，让上层重新拉一次历史
+     * （断线期间漏掉的事件不会自己补回来）。
      */
     fun events(): Flow<JSONObject> = flow {
+        var connectedBefore = false
         while (true) {
             try {
                 val request = Request.Builder()
@@ -184,29 +195,34 @@ class OpencodeApi(
                     .header("Accept", "text/event-stream")
                     .header("Cache-Control", "no-cache")
                     .build()
-                client.newBuilder().callTimeout(0, TimeUnit.MILLISECONDS).build()
-                    .newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) throw ApiException(response.code, "event stream")
-                        val source = response.body?.source() ?: return@use
-                        val data = StringBuilder()
-                        while (true) {
-                            val line = source.readUtf8Line() ?: break
-                            when {
-                                line.isEmpty() -> {
-                                    if (data.isNotEmpty()) {
-                                        val payload = data.toString()
-                                        data.clear()
-                                        runCatching { emit(JSONObject(payload)) }
-                                    }
+                sseClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw ApiException(response.code, "event stream")
+                    val source = response.body?.source() ?: return@use
+                    if (connectedBefore) {
+                        emit(JSONObject().put("type", "resync"))
+                    }
+                    connectedBefore = true
+                    val data = StringBuilder()
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        when {
+                            line.isEmpty() -> {
+                                if (data.isNotEmpty()) {
+                                    val payload = data.toString()
+                                    data.clear()
+                                    runCatching { emit(JSONObject(payload)) }
                                 }
-                                line.startsWith("data:") -> data.append(line.removePrefix("data:").trim())
                             }
+                            line.startsWith("data:") -> data.append(line.removePrefix("data:").trim())
                         }
                     }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 // 服务没起来或断线：稍后重连
             }
-            delay(1200)
+            delay(1500)
         }
     }.flowOn(Dispatchers.IO)
 }

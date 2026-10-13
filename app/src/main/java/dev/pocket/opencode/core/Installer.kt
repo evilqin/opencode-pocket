@@ -10,6 +10,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -58,6 +60,11 @@ data class InstallSnapshot(
 /**
  * 分步安装：每一步都可单独重跑（断网、换镜像、换版本都不需要从头来）。
  * 所有状态落盘到 `files/linux/state.json`，重启 App 后能续上。
+ *
+ * 几条必须守住的规则：
+ *   - 取消只是「请求」：正在跑的协程真正结束后，job 才会清空，不会出现两套流水线同时改 rootfs；
+ *   - 失败信息（FAILED + error）不会被 refresh() 抹掉，用户随时能看到哪一步为什么失败；
+ *   - 大动作尽量原子：rootfs 先解压到 `ubuntu.new` 再整体替换，下载包留到自检通过才删。
  */
 class Installer(
     private val context: Context,
@@ -75,8 +82,13 @@ class Installer(
     private val _state = MutableStateFlow(InstallSnapshot())
     val state: StateFlow<InstallSnapshot> = _state.asStateFlow()
 
-    private val _logs = MutableSharedFlow<String>(replay = 300, extraBufferCapacity = 512)
+    private val _logs = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 1024)
     val logs: SharedFlow<String> = _logs.asSharedFlow()
+
+    /** 日志环形缓冲：给「终端 → 安装日志」做历史回填，并且支持真正的「清屏」。 */
+    private val recent = ArrayDeque<String>()
+    private val _recentLogs = MutableStateFlow<List<String>>(emptyList())
+    val recentLogs: StateFlow<List<String>> = _recentLogs.asStateFlow()
 
     private val _versions = MutableStateFlow<Map<String, String>>(emptyMap())
     val versions: StateFlow<Map<String, String>> = _versions.asStateFlow()
@@ -87,34 +99,42 @@ class Installer(
     @Volatile
     private var cancelRequested = false
 
+    val isBusy: Boolean get() = job?.isActive == true
+
+    fun clearLogs() {
+        synchronized(recent) {
+            recent.clear()
+            _recentLogs.value = emptyList()
+        }
+    }
+
     // ------------------------------------------------------------------ 对外 API
 
-    suspend fun refresh() {
+    suspend fun refresh() = withContext(Dispatchers.IO) {
         val records = readState()
         val disk = detectOnDisk()
-        val merged = records.toMutableMap()
-        for ((step, ok) in disk) {
-            if (ok) merged[step.id] = merged[step.id] ?: StepSnapshot(step, StepState.DONE)
-            else merged.remove(step.id)
-        }
         val steps = InstallStep.entries.map { step ->
-            val record = merged[step.id]
+            val record = records[step.id]
             when {
-                record == null -> StepSnapshot(step)
-                record.state == StepState.DONE || disk[step] == true -> StepSnapshot(
-                    step,
-                    StepState.DONE,
-                    record.detail,
-                    progress = 1f,
-                )
-                else -> record
+                // 磁盘上确实在：补齐 DONE（升级/手工改动后自愈）
+                disk[step] == true -> StepSnapshot(step, StepState.DONE, record?.detail.orEmpty(), progress = 1f)
+                // 正在进行中的步骤不要被刷新打断
+                _state.value.running == step -> _state.value.step(step)
+                // 失败信息要留住：用户随时能看到哪一步为什么失败
+                record?.state == StepState.FAILED -> record
+                record?.state == StepState.SKIPPED -> record
+                // 记录说完成但磁盘上没了（例如手动删了 rootfs）：退回待安装
+                record?.state == StepState.DONE -> StepSnapshot(step, StepState.PENDING, record.detail)
+                record != null -> record
+                else -> StepSnapshot(step)
             }
         }
-        _state.value = _state.value.copy(
-            steps = steps,
-            running = null,
-            installed = isInstalled(steps, settings.snapshot()),
-        )
+        _state.update {
+            it.copy(
+                steps = steps,
+                installed = isInstalled(steps, settings.snapshot()),
+            )
+        }
         _versions.value = loadVersions()
     }
 
@@ -123,19 +143,18 @@ class Installer(
         val pending = _state.value.steps
             .filter { it.state != StepState.DONE }
             .map { it.step }
-            .toMutableList()
-        val ordered = InstallStep.entries.filter { it in pending }
-        installSteps(ordered)
+        installSteps(InstallStep.entries.filter { it in pending })
     }
 
     /** 单独重跑某一步。 */
     suspend fun reinstall(step: InstallStep) = installSteps(listOf(step))
 
     suspend fun installSteps(steps: List<InstallStep>) {
+        // 有任务在跑就拒绝新任务（取消也走这个判断：cancel() 不会立刻清 job）
         if (job?.isActive == true) return
         cancelRequested = false
         val current = settings.snapshot()
-        val job = scope.launch {
+        val started = scope.launch {
             try {
                 for (step in steps) {
                     if (cancelRequested) throw CancellationException("已取消")
@@ -150,9 +169,9 @@ class Installer(
                     updateStep(step, StepState.DONE, detail = detail, progress = 1f)
                     log("✔ ${step.title}：完成（$detail）")
                 }
-                _state.value = _state.value.copy(running = null, message = "安装完成")
+                _state.update { it.copy(running = null, message = "安装完成") }
             } catch (cancelled: CancellationException) {
-                _state.value = _state.value.copy(running = null, message = "已取消")
+                _state.update { it.copy(running = null, message = "已取消") }
                 throw cancelled
             } catch (error: Exception) {
                 val running = _state.value.running
@@ -160,24 +179,24 @@ class Installer(
                     updateStep(running, StepState.FAILED, error = error.message ?: error.toString())
                     log("✘ ${running.title}：失败 — ${error.message}")
                 }
-                _state.value = _state.value.copy(running = null, message = error.message ?: "安装失败")
+                _state.update { it.copy(running = null, message = error.message ?: "安装失败") }
             } finally {
-                persistState()
-                refresh()
+                // 取消时这里也在取消的协程里：必须用 NonCancellable，否则状态刷不回去
+                withContext(NonCancellable) {
+                    persistState()
+                    refresh()
+                }
             }
         }
-        this.job = job
-        job.join()
+        job = started
+        started.join()
+        if (job === started) job = null
     }
 
     fun cancel() {
         cancelRequested = true
-        job?.cancel()
-        job = null
-        _state.value = _state.value.copy(running = null, message = "已取消")
+        _state.update { it.copy(message = "正在取消…") }
     }
-
-    val isBusy: Boolean get() = job?.isActive == true
 
     /** 更新 opencode 到最新版（只跑 OPENCODE 步骤）。 */
     suspend fun updateOpencode() = reinstall(InstallStep.OPENCODE)
@@ -195,15 +214,23 @@ class Installer(
         return free < 0 || free > 2L * 1024 * 1024 * 1024
     }
 
+    /** 删除容器环境。调用方负责先停服务。 */
     suspend fun uninstallEnvironment() = withContext(Dispatchers.IO) {
+        if (isBusy) {
+            cancel()
+            log("等待当前任务停止后再清理…")
+            runCatching { job?.join() }
+        }
         log("开始清理容器环境…")
-        paths.rootfs.deleteRecursively()
-        paths.tmpDir.deleteRecursively()
-        paths.libDir.deleteRecursively()
+        FileOps.deleteTree(paths.rootfs)
+        FileOps.deleteTree(paths.tmpDir)
+        FileOps.deleteTree(paths.libDir)
+        FileOps.deleteTree(paths.downloadDir)
+        FileOps.deleteTree(paths.shmDir)
         paths.stateFile.delete()
         _state.value = InstallSnapshot()
         _versions.value = emptyMap()
-        log("容器环境已删除")
+        log("容器环境已删除（工作区文件不受影响）")
     }
 
     /** 读取可展示的版本信息。 */
@@ -248,56 +275,79 @@ class Installer(
         }
         val mirror = Mirrors.find(Mirrors.ubuntu, config.ubuntuMirror)
         setProgress(0.01f, "查找镜像文件…")
-        var artifact = try {
+        val artifact = try {
             repos.ubuntuBase(mirror)
         } catch (error: Exception) {
-            log("镜像 ${mirror.name} 不可用（${error.message}），尝试自动切换…")
+            log("镜像 ${mirror.name} 不可用（${error.message}），自动换一个…")
             val fallback = Mirrors.ubuntu.firstOrNull { it.id != mirror.id } ?: throw error
             repos.ubuntuBase(fallback).also { log("改用 ${fallback.name}") }
         }
-        log("rootfs：${artifact.fileName}（${artifact.size / 1024 / 1024} MB）来自 ${mirror.name}")
+        val sizeText = if (artifact.size > 0) "${artifact.size / 1024 / 1024} MB" else "大小未知"
+        log("rootfs：${artifact.fileName}（$sizeText）来自 ${mirror.name}")
 
-        val target = File(paths.downloadDir, artifact.fileName)
+        // 备选地址直接用同一个文件名拼，不再逐个镜像去拉目录列表（那会让下载晚十几秒）
         val urls = buildList {
             add(artifact.url)
-            Mirrors.ubuntu.filter { it.id != config.ubuntuMirror }.forEach { m ->
-                runCatching { repos.ubuntuBase(m) }.getOrNull()?.let { add(it.url) }
-            }
+            Mirrors.ubuntu.filter { it.id != mirror.id }.forEach { add("${it.base}/${artifact.fileName}") }
         }.distinct()
 
-        val file = downloads.fetchFrom(urls, target, isCanceled = { cancelRequested }) { progress ->
-            setProgress((progress.fraction * 0.7f).coerceIn(0f, 0.7f), "下载中 ${progress.bytes / 1024 / 1024}MB / ${progress.total / 1024 / 1024}MB")
+        val target = File(paths.downloadDir, artifact.fileName)
+        val expected = Downloader.ExpectedHash.sha256(artifact.sha256)
+        if (expected == null) log("提示：该镜像没有提供 SHA256SUMS，本次跳过摘要校验")
+        val file = downloads.fetchFrom(urls, target, expected, isCanceled = { cancelRequested }) { progress ->
+            val detail = if (progress.known) {
+                "下载中 ${progress.bytes / 1024 / 1024}MB / ${progress.total / 1024 / 1024}MB"
+            } else {
+                "下载中 ${progress.bytes / 1024 / 1024}MB"
+            }
+            setProgress((progress.fraction * 0.7f).coerceIn(0f, 0.7f), detail)
         }
+        if (expected != null) log("rootfs 摘要校验通过")
 
+        // 先解压到 ubuntu.new，自检通过后再整体替换：中途失败不会把能用的环境毁掉
         setProgress(0.72f, "解压中…")
-        if (paths.rootfs.exists()) paths.rootfs.deleteRecursively()
-        paths.rootfs.mkdirs()
+        val staging = File(paths.home, "ubuntu.new")
+        FileOps.deleteTree(staging)
+        staging.mkdirs()
         val stats = TarExtract.extract(
             archive = file,
-            dest = paths.rootfs,
+            dest = staging,
             isActive = { !cancelRequested },
             onProgress = { s ->
-                val fraction = if (artifact.size > 0) (s.bytes.toFloat() / (artifact.size * 4f)) else -1f
-                setProgress((0.72f + fraction.coerceIn(0f, 0.2f)), "解压 ${s.files} 个文件…")
+                val fraction = if (artifact.size > 0) (s.bytes.toFloat() / (artifact.size * 4f)) else 0f
+                setProgress(0.72f + fraction.coerceIn(0f, 0.2f), "解压 ${s.files} 个文件…")
             },
         )
-        log("解压完成：${stats.files} 个文件，${stats.bytes / 1024 / 1024} MB")
+        log("解压完成：${stats.files} 个文件，${stats.bytes / 1024 / 1024} MB" +
+            if (stats.skippedLinks > 0 || stats.escaped > 0) {
+                "（跳过链接 ${stats.skippedLinks} 个，越界条目 ${stats.escaped} 个）"
+            } else {
+                ""
+            })
 
-        // 基础目录与解析器（先于 TOOLS 步骤，保证 apt 能解析域名）
+        // 换上去，并写入基础配置
+        FileOps.replaceDirectory(staging, paths.rootfs)
         writeGuestFile("/etc/profile.d/90-pocket.sh", assetText("scripts/profile.sh"), 0b110_100_100)
         net.writeResolvConf()
         installSystemCaBundle()
-        file.delete()
 
         setProgress(0.95f, "自检…")
-        val check = shell.run("uname -m && . /etc/os-release && echo \$PRETTY_NAME && id -u", config, timeoutMs = 90_000)
+        val check = shell.run(
+            "uname -m && . /etc/os-release && echo \$PRETTY_NAME && id -u",
+            config,
+            timeoutMs = 90_000,
+            isCanceled = { cancelRequested },
+        )
         if (!check.success) {
             throw IllegalStateException("rootfs 自检失败：${check.text.takeLast(400)}")
         }
         val arch = check.lines.firstOrNull()?.trim().orEmpty()
         if (arch != "aarch64") throw IllegalStateException("rootfs 架构异常：$arch")
+
+        // 自检通过才删下载包（删早了失败就得重下 30 MB）
+        file.delete()
         saveVersion("ubuntu", artifact.version)
-        return "Ubuntu $artifact.version"
+        return "Ubuntu ${artifact.version}"
     }
 
     private suspend fun stepTools(config: AppSettings): String {
@@ -316,12 +366,29 @@ class Installer(
         writeGuestFile("/root/.pocket/install-tools.sh", assetText("scripts/install-tools.sh"), 0b111_101_101)
 
         setProgress(0.1f, "刷新软件源…")
-        val update = shell.run("/root/.pocket/setup-apt.sh", config, timeoutMs = 600_000) { line -> log("apt: $line") }
+        val update = shell.run(
+            "/root/.pocket/setup-apt.sh",
+            config,
+            timeoutMs = 600_000,
+            isCanceled = { cancelRequested },
+        ) { line -> log("apt: $line") }
         if (!update.success) throw IllegalStateException("apt update 失败：${update.text.takeLast(400)}")
 
         setProgress(0.5f, "安装基础工具…")
-        val install = shell.run("/root/.pocket/install-tools.sh", config, timeoutMs = 900_000) { line -> log("apt: $line") }
-        if (!install.success) throw IllegalStateException("工具安装失败：${install.text.takeLast(400)}")
+        val install = shell.run(
+            "/root/.pocket/install-tools.sh",
+            config,
+            timeoutMs = 900_000,
+            isCanceled = { cancelRequested },
+        ) { line -> log("apt: $line") }
+        if (!install.success) {
+            val hint = if (install.text.contains("dpkg was interrupted", ignoreCase = true)) {
+                "（dpkg 中断过，重跑本步骤会自动修复）"
+            } else {
+                ""
+            }
+            throw IllegalStateException("工具安装失败$hint：${install.text.takeLast(400)}")
+        }
         saveVersion("tools", "ready")
         return "git / curl / ripgrep 已就绪"
     }
@@ -332,42 +399,58 @@ class Installer(
         val artifact = try {
             repos.nodeLts(mirror)
         } catch (error: Exception) {
+            log("镜像 ${mirror.name} 不可用（${error.message}），自动换一个…")
             val fallback = Mirrors.node.firstOrNull { it.id != mirror.id } ?: throw error
-            repos.nodeLts(fallback)
+            repos.nodeLts(fallback).also { log("改用 ${fallback.name}") }
         }
         log("Node：${artifact.version}（${artifact.fileName}）来自 ${mirror.name}")
-        val target = File(paths.downloadDir, artifact.fileName)
+
         val urls = buildList {
             add(artifact.url)
-            Mirrors.node.filter { it.id != config.nodeMirror }.forEach { m ->
-                runCatching { repos.nodeLts(m) }.getOrNull()?.let { add(A("${m.base}/${artifact.version}/node-${artifact.version}-linux-arm64.tar.xz")) }
+            Mirrors.node.filter { it.id != mirror.id }.forEach {
+                add("${it.base}/${artifact.version}/${artifact.fileName}")
             }
         }.distinct()
 
-        val file = downloads.fetchFrom(urls, target, isCanceled = { cancelRequested }) { progress ->
-            setProgress((progress.fraction * 0.8f).coerceIn(0f, 0.8f), "下载 Node ${progress.bytes / 1024 / 1024}MB / ${progress.total / 1024 / 1024}MB")
+        val target = File(paths.downloadDir, artifact.fileName)
+        val expected = Downloader.ExpectedHash.sha256(artifact.sha256)
+        if (expected == null) log("提示：该镜像没有 SHASUMS256.txt，本次跳过摘要校验")
+        val file = downloads.fetchFrom(urls, target, expected, isCanceled = { cancelRequested }) { progress ->
+            setProgress(
+                (progress.fraction * 0.8f).coerceIn(0f, 0.8f),
+                "下载 Node ${progress.bytes / 1024 / 1024}MB / ${(progress.total / 1024 / 1024).coerceAtLeast(0)}MB",
+            )
         }
+        if (expected != null) log("Node 摘要校验通过")
 
         setProgress(0.82f, "解压 Node…")
         if (File(paths.rootfs, "usr/local/bin/node").exists()) {
-            File(paths.rootfs, "usr/local/lib/node_modules").deleteRecursively()
+            FileOps.deleteTree(File(paths.rootfs, "usr/local/lib/node_modules"))
         }
         val dest = File(paths.rootfs, "usr/local")
-        TarExtract.extract(file, dest, strip = 1, onProgress = { s ->
-            setProgress(0.82f + (s.files % 100) / 500f, "解压 ${s.files} 个文件…")
-        })
-        Os.chmod(File(dest, "bin/node").absolutePath, 0b111_101_101)
+        TarExtract.extract(
+            archive = file,
+            dest = dest,
+            strip = 1,
+            isActive = { !cancelRequested },
+            onProgress = { s ->
+                setProgress(0.82f + (s.files % 100) / 500f, "解压 ${s.files} 个文件…")
+            },
+        )
+        runCatching { Os.chmod(File(dest, "bin/node").absolutePath, 0b111_101_101) }
         val npmBin = File(dest, "lib/node_modules/npm/bin/npm-cli.js")
         if (npmBin.isFile) {
             File(dest, "bin/npm").delete()
             File(dest, "bin/npx").delete()
-            Os.symlink("../lib/node_modules/npm/bin/npm-cli.js", File(dest, "bin/npm").absolutePath)
-            Os.symlink("../lib/node_modules/npm/bin/npx-cli.js", File(dest, "bin/npx").absolutePath)
+            runCatching {
+                Os.symlink("../lib/node_modules/npm/bin/npm-cli.js", File(dest, "bin/npm").absolutePath)
+                Os.symlink("../lib/node_modules/npm/bin/npx-cli.js", File(dest, "bin/npx").absolutePath)
+            }
         }
         file.delete()
 
         setProgress(0.95f, "自检…")
-        val check = shell.run("node -v && npm -v", config, timeoutMs = 120_000)
+        val check = shell.run("node -v && npm -v", config, timeoutMs = 120_000, isCanceled = { cancelRequested })
         if (!check.success) throw IllegalStateException("Node 自检失败：${check.text.takeLast(300)}")
         saveVersion("node", artifact.version)
         return "Node ${check.lines.firstOrNull()?.trim() ?: artifact.version}"
@@ -376,48 +459,67 @@ class Installer(
     private suspend fun stepOpencode(config: AppSettings): String {
         val registry = Mirrors.find(Mirrors.npm, config.npmMirror)
         setProgress(0.02f, "查询最新版本…")
-        val version = try {
-            repos.opencodeVersion(registry.base)
-        } catch (error: Exception) {
-            val fallback = Mirrors.npm.firstOrNull { it.id != registry.id } ?: throw error
-            repos.opencodeVersion(fallback.base)
+        val primary = registry.base
+        val primaryVersion = runCatching { repos.opencodeVersion(primary) }.getOrNull()
+        val registryBase: String
+        val version: String
+        if (primaryVersion != null) {
+            registryBase = primary
+            version = primaryVersion
+        } else {
+            val fallback = Mirrors.npm.firstOrNull { it.id != registry.id } ?: throw IllegalStateException("所有 npm 镜像都不可用")
+            log("registry ${registry.name} 不可用，改用 ${fallback.name}")
+            registryBase = fallback.base
+            version = repos.opencodeVersion(registryBase)
         }
-        log("OpenCode 最新版：$version（registry: ${registry.name}）")
-        val tarball = repos.opencodeTarball(registry.base, version)
+        log("OpenCode 最新版：$version（registry: $registryBase）")
+
+        val tarball = repos.opencodeTarball(registryBase, version)
         val urls = buildList {
             add(tarball.url)
-            Mirrors.npm.filter { it.id != registry.id }.forEach { it ->
-                add("${it.base}/opencode-linux-arm64/-/opencode-linux-arm64-$version.tgz")
+            Mirrors.npm.filter { it.base != registryBase }.forEach {
+                add("${it.base}/opencode-linux-arm64/-/${tarball.fileName}")
             }
         }.distinct()
         val target = File(paths.downloadDir, tarball.fileName)
-        val file = downloads.fetchFrom(urls, target, isCanceled = { cancelRequested }) { progress ->
-            setProgress((progress.fraction * 0.85f).coerceIn(0f, 0.85f), "下载 ${progress.bytes / 1024 / 1024}MB / ${progress.total / 1024 / 1024}MB")
+        // npm 的 dist.shasum 是 sha1；拿不到就不校验（HTTPS 仍在）
+        val expected = Downloader.ExpectedHash.sha1(repos.opencodeSha1(registryBase, version))
+        if (expected == null) log("提示：registry 没有提供 shasum，本次跳过摘要校验")
+
+        val file = downloads.fetchFrom(urls, target, expected, isCanceled = { cancelRequested }) { progress ->
+            setProgress(
+                (progress.fraction * 0.85f).coerceIn(0f, 0.85f),
+                "下载 ${progress.bytes / 1024 / 1024}MB / ${(progress.total / 1024 / 1024).coerceAtLeast(0)}MB",
+            )
         }
+        if (expected != null) log("opencode 摘要校验通过")
 
         setProgress(0.88f, "安装可执行文件…")
         val binDir = File(paths.rootfs, "usr/local/lib/opencode")
-        binDir.deleteRecursively()
+        FileOps.deleteTree(binDir)
         binDir.mkdirs()
         TarExtract.extract(
             archive = file,
             dest = binDir,
             strip = 1,
+            isActive = { !cancelRequested },
             include = { relative -> relative == "bin/opencode" },
         )
         val binary = File(binDir, "bin/opencode")
         if (!binary.isFile) throw IllegalStateException("压缩包里没有找到 bin/opencode")
-        Os.chmod(binary.absolutePath, 0b111_101_101)
+        runCatching { Os.chmod(binary.absolutePath, 0b111_101_101) }
         val link = File(paths.rootfs, "usr/local/bin/opencode")
         link.parentFile?.mkdirs()
         link.delete()
-        Os.symlink("../lib/opencode/bin/opencode", link.absolutePath)
+        runCatching { Os.symlink("../lib/opencode/bin/opencode", link.absolutePath) }
         file.delete()
 
         setProgress(0.94f, "自检（首次运行会慢一些）…")
-        val check = shell.run("opencode --version", config, timeoutMs = 240_000) { line -> log("opencode: $line") }
+        val check = shell.run("opencode --version", config, timeoutMs = 240_000, isCanceled = { cancelRequested }) { line ->
+            log("opencode: $line")
+        }
         if (!check.success) throw IllegalStateException("opencode 无法运行：${check.text.takeLast(500)}")
-        val detected = check.text.lines().firstOrNull { it.trim().isNotEmpty() }?.trim() ?: version
+        val detected = check.lines.firstOrNull { it.trim().isNotEmpty() }?.trim() ?: version
         saveVersion("opencode", detected)
         return "OpenCode $detected"
     }
@@ -427,11 +529,17 @@ class Installer(
         val env = buildMap {
             put("POCKET_NPM_REGISTRY", Mirrors.find(Mirrors.npm, config.npmMirror).base)
         }
-        val result = shell.run("/root/.pocket/setup-env.sh", config, extraEnv = env, timeoutMs = 120_000)
+        val result = shell.run(
+            "/root/.pocket/setup-env.sh",
+            config,
+            extraEnv = env,
+            timeoutMs = 120_000,
+            isCanceled = { cancelRequested },
+        )
         if (!result.success) throw IllegalStateException("容器配置失败：${result.text.takeLast(300)}")
 
         // opencode 配置（模型、密钥、权限、服务器）
-        val json = OpencodeConfig.build(config, proot.resolveWorkspace(config).guest)
+        val json = OpencodeConfig.build(config)
         writeGuestFile(PocketPaths.Guest.OPENCODE_CONFIG, json, 0b110_000_000)
         log("已写入 opencode 配置（${json.length} 字节）")
         saveVersion("config", "ready")
@@ -439,8 +547,6 @@ class Installer(
     }
 
     // ------------------------------------------------------------------ 工具方法
-
-    private fun A(url: String) = url
 
     private suspend fun detectUbuntuCodename(): String? = withContext(Dispatchers.IO) {
         val osRelease = File(paths.rootfs, "etc/os-release")
@@ -453,10 +559,140 @@ class Installer(
         val file = File(paths.rootfs, guestPath.trimStart('/'))
         file.parentFile?.mkdirs()
         file.writeText(content)
-        try {
-            Os.chmod(file.absolutePath, mode)
-        } catch (_: Exception) {
+        runCatching { Os.chmod(file.absolutePath, mode) }
+    }
+
+    private fun assetText(name: String): String =
+        context.assets.open(name).bufferedReader().use { it.readText() }
+
+    private fun log(line: String) {
+        val stamped = "[${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}] $line"
+        _logs.tryEmit(stamped)
+        synchronized(recent) {
+            recent.addLast(stamped)
+            while (recent.size > MAX_LOG_LINES) recent.removeFirst()
+            _recentLogs.value = recent.toList()
         }
+        runCatching {
+            rotateInstallLogIfNeeded()
+            paths.installLog.appendText(stamped + "\n")
+        }
+    }
+
+    /** install.log 超过 2 MB 就轮转一次，避免长期使用无限增长。 */
+    private fun rotateInstallLogIfNeeded() {
+        val log = paths.installLog
+        if (!log.isFile || log.length() < MAX_LOG_BYTES) return
+        val backup = File(log.parentFile, log.name + ".1")
+        backup.delete()
+        log.renameTo(backup)
+    }
+
+    private fun markRunning(step: InstallStep) {
+        _state.update { snapshot ->
+            snapshot.copy(
+                running = step,
+                message = step.title,
+                steps = snapshot.steps.map {
+                    if (it.step == step) it.copy(state = StepState.RUNNING, progress = 0f, error = null) else it
+                },
+            )
+        }
+        log("▶ ${step.title}：${step.subtitle}")
+    }
+
+    private fun updateStep(
+        step: InstallStep,
+        state: StepState,
+        detail: String = "",
+        progress: Float = -1f,
+        error: String? = null,
+    ) {
+        _state.update { snapshot ->
+            snapshot.copy(
+                steps = snapshot.steps.map {
+                    if (it.step == step) it.copy(state = state, detail = detail, progress = progress, error = error) else it
+                },
+            )
+        }
+    }
+
+    private fun setProgress(value: Float, message: String) {
+        _state.update { snapshot ->
+            val running = snapshot.running ?: return@update snapshot.copy(message = message)
+            snapshot.copy(
+                message = message,
+                steps = snapshot.steps.map {
+                    if (it.step == running) it.copy(progress = value) else it
+                },
+            )
+        }
+    }
+
+    private fun isInstalled(steps: List<StepSnapshot>, config: AppSettings): Boolean =
+        steps
+            .filter { !it.step.optional || (it.step == InstallStep.NODE && config.installNode) }
+            .all { it.state == StepState.DONE || (it.step == InstallStep.NODE && it.state == StepState.SKIPPED) }
+
+    /** 从磁盘探测真实安装情况（升级/手动改动后也能自愈）。注意 guest 路径要带 root/ 前缀。 */
+    private fun detectOnDisk(): Map<InstallStep, Boolean> = linkedMapOf(
+        InstallStep.BOOT to paths.bootRuntimeStaged(),
+        InstallStep.ROOTFS to paths.rootfsLooksInstalled(),
+        InstallStep.TOOLS to File(paths.rootfs, "usr/bin/git").isFile,
+        InstallStep.NODE to File(paths.rootfs, "usr/local/bin/node").isFile,
+        InstallStep.OPENCODE to File(paths.rootfs, PocketPaths.Guest.OPENCODE_BIN.trimStart('/')).isFile,
+        InstallStep.CONFIG to File(paths.rootfs, PocketPaths.Guest.OPENCODE_CONFIG.trimStart('/')).isFile,
+    )
+
+    // ------------------------------------------------------------------ 持久化
+
+    private fun readStateJson(): JSONObject = try {
+        if (paths.stateFile.isFile) JSONObject(paths.stateFile.readText()) else JSONObject()
+    } catch (_: Exception) {
+        JSONObject()
+    }
+
+    private fun readState(): Map<String, StepSnapshot> {
+        val json = readStateJson()
+        val steps = json.optJSONObject("steps") ?: return emptyMap()
+        val result = LinkedHashMap<String, StepSnapshot>()
+        for (step in InstallStep.entries) {
+            val item = steps.optJSONObject(step.id) ?: continue
+            val state = runCatching { StepState.valueOf(item.optString("state", "PENDING")) }
+                .getOrDefault(StepState.PENDING)
+            result[step.id] = StepSnapshot(
+                step = step,
+                state = state,
+                detail = item.optString("detail"),
+                progress = if (state == StepState.DONE) 1f else -1f,
+                error = item.optString("error").takeIf { it.isNotBlank() },
+            )
+        }
+        return result
+    }
+
+    private fun persistState() {
+        val json = JSONObject()
+        val steps = JSONObject()
+        for (item in _state.value.steps) {
+            steps.put(
+                item.step.id,
+                JSONObject().apply {
+                    put("state", item.state.name)
+                    put("detail", item.detail)
+                    item.error?.let { put("error", it) }
+                },
+            )
+        }
+        json.put("steps", steps)
+        json.put("versions", JSONObject(_versions.value as Map<*, *>))
+        json.put("updatedAt", System.currentTimeMillis())
+        runCatching { paths.stateFile.writeText(json.toString(2)) }
+    }
+
+    private fun saveVersion(key: String, value: String) {
+        _versions.value = _versions.value + (key to value)
+        persistState()
     }
 
     /**
@@ -474,115 +710,37 @@ class Installer(
         if (sources.isEmpty()) return
 
         val target = File(paths.rootfs, "etc/ssl/certs/ca-certificates.crt")
-        if (target.isFile && target.length() > 0) return
+        if (target.isFile && target.length() > 8 * 1024) return
         target.parentFile?.mkdirs()
 
-        val builder = StringBuilder()
-        val seen = HashSet<String>()
-        for (directory in sources) {
-            val files = directory.listFiles()?.sortedBy { it.name } ?: continue
-            for (file in files) {
-                if (!file.isFile || !seen.add(file.name)) continue
-                runCatching { builder.append(file.readText()).append('\n') }
+        var count = 0
+        try {
+            java.io.FileOutputStream(target).use { output ->
+                val seen = HashSet<String>()
+                for (directory in sources) {
+                    val files = directory.listFiles()?.sortedBy { it.name } ?: continue
+                    for (file in files) {
+                        if (!file.isFile || !seen.add(file.name)) continue
+                        // 按字节拼接：证书是 PEM 文本，但不该假设编码/换行
+                        file.inputStream().use { input -> input.copyTo(output) }
+                        output.write('\n'.code)
+                        count++
+                    }
+                }
             }
+        } catch (error: Exception) {
+            log("注入系统 CA 失败：${error.message}")
         }
-        if (builder.isNotEmpty()) {
-            target.writeText(builder.toString())
-            log("已注入系统 CA 证书（${target.length() / 1024} KB）")
-        }
-    }
-
-    private fun assetText(name: String): String =
-        context.assets.open(name).bufferedReader().use { it.readText() }
-
-    private fun log(line: String) {
-        val stamped = "[${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}] $line"
-        _logs.tryEmit(stamped)
-        runCatching {
-            paths.installLog.appendText(stamped + "\n")
+        if (count == 0) {
+            target.delete()
+            log("系统 CA 目录里没有可用的证书，apt 将退回 http 源")
+        } else {
+            log("已注入系统 CA 证书 $count 张（${target.length() / 1024} KB）")
         }
     }
 
-    private fun markRunning(step: InstallStep) {
-        _state.value = _state.value.copy(
-            running = step,
-            message = step.title,
-            steps = _state.value.steps.map {
-                if (it.step == step) it.copy(state = StepState.RUNNING, progress = 0f, error = null) else it
-            },
-        )
-        log("▶ ${step.title}：${step.subtitle}")
-    }
-
-    private fun updateStep(step: InstallStep, state: StepState, detail: String = "", progress: Float = -1f, error: String? = null) {
-        _state.value = _state.value.copy(
-            steps = _state.value.steps.map {
-                if (it.step == step) it.copy(state = state, detail = detail, progress = progress, error = error) else it
-            },
-        )
-    }
-
-    private fun setProgress(value: Float, message: String) {
-        val running = _state.value.running ?: return
-        _state.value = _state.value.copy(
-            message = message,
-            steps = _state.value.steps.map {
-                if (it.step == running) it.copy(progress = value) else it
-            },
-        )
-    }
-
-    private fun isInstalled(steps: List<StepSnapshot>, config: AppSettings): Boolean =
-        steps.filter { !it.step.optional || (it.step == InstallStep.NODE && config.installNode) }
-            .all { it.state == StepState.DONE || (it.step == InstallStep.NODE && it.state == StepState.SKIPPED) }
-
-    /** 从磁盘探测真实安装情况（升级/手动改动后也能自愈）。 */
-    private fun detectOnDisk(): Map<InstallStep, Boolean> = linkedMapOf(
-        InstallStep.BOOT to paths.bootRuntimeStaged(),
-        InstallStep.ROOTFS to paths.rootfsLooksInstalled(),
-        InstallStep.TOOLS to File(paths.rootfs, "usr/bin/git").isFile,
-        InstallStep.NODE to File(paths.rootfs, "usr/local/bin/node").isFile,
-        InstallStep.OPENCODE to File(paths.rootfs, "usr/local/lib/opencode/bin/opencode").isFile,
-        InstallStep.CONFIG to File(paths.rootfs, ".config/opencode/opencode.json").isFile,
-    )
-
-    // ------------------------------------------------------------------ 持久化
-
-    private fun readStateJson(): JSONObject = try {
-        if (paths.stateFile.isFile) JSONObject(paths.stateFile.readText()) else JSONObject()
-    } catch (_: Exception) {
-        JSONObject()
-    }
-
-    private fun readState(): Map<String, StepSnapshot> {
-        val json = readStateJson()
-        val steps = json.optJSONObject("steps") ?: return emptyMap()
-        val result = LinkedHashMap<String, StepSnapshot>()
-        for (step in InstallStep.entries) {
-            val item = steps.optJSONObject(step.id) ?: continue
-            val state = runCatching { StepState.valueOf(item.optString("state", "PENDING")) }.getOrDefault(StepState.PENDING)
-            result[step.id] = StepSnapshot(step, state, item.optString("detail"), progress = if (state == StepState.DONE) 1f else -1f)
-        }
-        return result
-    }
-
-    private fun persistState() {
-        val json = JSONObject()
-        val steps = JSONObject()
-        for (item in _state.value.steps) {
-            steps.put(item.step.id, JSONObject().apply {
-                put("state", item.state.name)
-                put("detail", item.detail)
-            })
-        }
-        json.put("steps", steps)
-        json.put("versions", JSONObject(_versions.value as Map<*, *>))
-        json.put("updatedAt", System.currentTimeMillis())
-        runCatching { paths.stateFile.writeText(json.toString(2)) }
-    }
-
-    private fun saveVersion(key: String, value: String) {
-        _versions.value = _versions.value + (key to value)
-        persistState()
+    private companion object {
+        const val MAX_LOG_LINES = 600
+        const val MAX_LOG_BYTES = 2L shl 20 // 2 MiB
     }
 }

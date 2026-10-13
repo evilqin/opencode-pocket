@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -21,7 +23,7 @@ import org.json.JSONObject
  * 开启条件（三者缺一不可）：用户在设置里打开开关、Shizuku 在运行、Shizuku 已授权。
  * 只要开着，就往容器里写三样东西：
  *   - `/usr/local/bin/dexec`：容器里调桥的命令
- *   - `/root/.config/opencode/pocket.json`：端口与 token
+ *   - `/root/.config/opencode/pocket.json`：端口与 token（注意是 root 家目录，不是容器根目录）
  *   - `/root/.config/opencode/skills/device-shell/SKILL.md`：告诉 agent 怎么用
  */
 class DeviceShellManager(
@@ -45,14 +47,19 @@ class DeviceShellManager(
     private val _status = MutableStateFlow(Status())
     val status: StateFlow<Status> = _status.asStateFlow()
 
+    private val syncLock = Mutex()
     private var server: DeviceShellServer? = null
 
-    /** 按当前设置把桥拉齐（幂等，随时可调）。 */
+    /** 按当前设置把桥拉齐（幂等，随时可调；并发调用会串行执行）。 */
     fun sync() {
         scope.launch { syncNow() }
     }
 
-    suspend fun syncNow() = withContext(Dispatchers.IO) {
+    suspend fun syncNow() = syncLock.withLock {
+        withContext(Dispatchers.IO) { doSync() }
+    }
+
+    private suspend fun doSync() {
         val config = settings.snapshot()
         val token = ensureToken(config)
         val available = shizuku.available()
@@ -63,7 +70,8 @@ class DeviceShellManager(
 
         if (shouldRun) {
             val current = server
-            if (current == null || !current.isRunning) {
+            // 没起来、或者端口被改过，都要重建监听
+            if (current == null || !current.isRunning || current.listeningPort != config.deviceShellPort) {
                 current?.stop()
                 val created = DeviceShellServer(config.deviceShellPort, token) { command, timeout ->
                     shizuku.exec(command, timeout)
@@ -72,18 +80,28 @@ class DeviceShellManager(
                     created.start()
                     server = created
                 } catch (error: Exception) {
+                    server = null
                     _status.value = Status(
-                        enabled = true, available = available, granted = granted, running = false,
-                        port = config.deviceShellPort, message = "端口 ${config.deviceShellPort} 启动失败：${error.message}",
+                        enabled = true,
+                        available = available,
+                        granted = granted,
+                        running = false,
+                        port = config.deviceShellPort,
+                        message = "端口 ${config.deviceShellPort} 启动失败：${error.message}",
                     )
+                    // 端口没起来就不要把容器里的配置写成“可用”
                     writeContainerFiles(enabled = false, config = config, token = token)
-                    return@withContext
+                    return
                 }
             }
         } else {
             server?.stop()
             server = null
             runCatching { shizuku.disconnect() }
+            // 关掉就作废旧令牌，下次开启换一把新的
+            if (config.deviceShellToken.isNotEmpty()) {
+                settings.update { it.copy(deviceShellToken = "") }
+            }
         }
 
         writeContainerFiles(enabled = shouldRun, config = config, token = token)
@@ -93,13 +111,13 @@ class DeviceShellManager(
             available = available,
             granted = granted,
             running = server?.isRunning == true,
-            port = config.deviceShellPort,
+            port = server?.listeningPort ?: config.deviceShellPort,
             identity = identity,
             message = when {
                 !config.deviceShell -> "未开启"
                 !available -> "Shizuku 没有在运行（先启动 Shizuku，再用无线调试或 root 启动）"
                 !granted -> "等待 Shizuku 授权"
-                else -> "运行中 · 身份 ${identity ?: "?"} · 127.0.0.1:${config.deviceShellPort}"
+                else -> "运行中 · 身份 ${identity ?: "?"} · 127.0.0.1:${server?.listeningPort ?: config.deviceShellPort}"
             },
         )
     }
@@ -125,7 +143,8 @@ class DeviceShellManager(
     /** 把容器里的三份文件写成与当前状态一致。 */
     private suspend fun writeContainerFiles(enabled: Boolean, config: AppSettings, token: String) {
         if (!paths.rootfsLooksInstalled()) return
-        val configDir = File(paths.rootfs, ".config/opencode")
+        // 注意：rootfs 是容器的 /，而 opencode 读的是 /root/.config/opencode
+        val configDir = File(paths.rootfs, "root/.config/opencode")
 
         // 1) dexec（永远写好，能不能用由 pocket.json 决定）
         runCatching {
@@ -140,9 +159,8 @@ class DeviceShellManager(
             configDir.mkdirs()
             val json = JSONObject()
                 .put("enabled", enabled)
-                .put("port", config.deviceShellPort)
+                .put("port", if (enabled) (server?.listeningPort ?: config.deviceShellPort) else config.deviceShellPort)
                 .put("token", token)
-                .put("identity", if (enabled) "shell" else "")
             File(configDir, "pocket.json").writeText(json.toString(2))
         }
 

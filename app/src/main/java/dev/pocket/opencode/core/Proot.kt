@@ -25,18 +25,11 @@ class Proot(
     fun stageBootRuntime() {
         require(paths.prootBin.isFile) { "内置运行时缺失：${paths.prootBin.name}（请重新安装 APK）" }
         require(paths.prootLoader.isFile) { "内置 loader 缺失：${paths.prootLoader.name}（请重新安装 APK）" }
-        copyIfNeeded(paths.tallocSource, paths.tallocRuntime)
-        copyIfNeeded(paths.shmemSource, paths.shmemRuntime)
-        Os.chmod(paths.prootBin.absolutePath, 0b111_101_101) // 755
-        Os.chmod(paths.prootLoader.absolutePath, 0b111_101_101)
-    }
-
-    private fun copyIfNeeded(source: File, target: File) {
-        require(source.isFile) { "内置运行时缺失：${source.name}（请重新安装 APK）" }
-        if (target.isFile && target.length() == source.length()) return
-        target.parentFile?.mkdirs()
-        source.inputStream().use { input -> target.outputStream().use { input.copyTo(it) } }
-        Os.chmod(target.absolutePath, 0b110_100_100) // 644
+        // 这两个是可执行文件：系统解压出来的通常已经带 x 位，chmod 失败不该让安装失败
+        runCatching { Os.chmod(paths.prootBin.absolutePath, 0b111_101_101) }
+        runCatching { Os.chmod(paths.prootLoader.absolutePath, 0b111_101_101) }
+        FileOps.copyIfChanged(paths.tallocSource, paths.tallocRuntime, 0b110_100_100)
+        FileOps.copyIfChanged(paths.shmemSource, paths.shmemRuntime, 0b110_100_100)
     }
 
     private var hardlinkCache: Boolean? = null
@@ -71,7 +64,8 @@ class Proot(
             return Workspace(paths.internalWorkspace, PocketPaths.Guest.WORKSPACE, false)
         }
         val host = File(config.workspace)
-        val usable = (host.isDirectory || host.mkdirs()) && host.canWrite()
+        // canWrite 在 Android 的 FUSE 上会撒谎：真的建个临时文件试试
+        val usable = (host.isDirectory || host.mkdirs()) && FileOps.canReallyWrite(host)
         if (!usable) {
             paths.internalWorkspace.mkdirs()
             return Workspace(paths.internalWorkspace, PocketPaths.Guest.WORKSPACE, false)
@@ -80,7 +74,11 @@ class Proot(
     }
 
     /** 组装 proot 的参数（不含最终要执行的 guest 命令）。 */
-    fun baseArgv(config: AppSettings = settings(), extraBinds: List<Pair<File, String>> = emptyList()): MutableList<String> {
+    fun baseArgv(
+        config: AppSettings = settings(),
+        extraBinds: List<Pair<File, String>> = emptyList(),
+        cwd: String = PocketPaths.Guest.ROOT,
+    ): MutableList<String> {
         val argv = mutableListOf<String>()
         argv += paths.prootBin.absolutePath
         if (!hardlinkSupported()) {
@@ -93,7 +91,7 @@ class Proot(
         argv += "--kill-on-exit"        // proot 退出时带走整个容器进程树
         argv += "-0"                    // fake root
         argv += "--rootfs=${paths.rootfs.absolutePath}"
-        argv += "--cwd=/root"
+        argv += "--cwd=$cwd"
 
         val binds = mutableListOf(
             "/dev" to "/dev",
@@ -173,7 +171,7 @@ class Proot(
         cwd: String = PocketPaths.Guest.ROOT,
         extraBinds: List<Pair<File, String>> = emptyList(),
     ): Process {
-        val argv = baseArgv(config, extraBinds)
+        val argv = baseArgv(config, extraBinds, cwd)
         argv += "/usr/bin/env"
         argv += "-i"
         argv += guestEnv(extraEnv)

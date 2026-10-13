@@ -12,6 +12,7 @@
  * 用法：node tools/verify-apk.mjs app/build/outputs/apk/debug/app-debug.apk
  */
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -54,6 +55,7 @@ function openZip(file) {
 
   return {
     names: () => [...entries.keys()],
+    methodOf: (name) => entries.get(name)?.method,
     read(name) {
       const entry = entries.get(name);
       if (!entry) return null;
@@ -72,6 +74,38 @@ function openZip(file) {
 
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+/** 在 SDK 目录里找一个可用的 aapt2（有就用它校验 manifest，没有就跳过）。 */
+function findAapt2() {
+  const sdkRoots = [process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT].filter(Boolean);
+  for (const root of sdkRoots) {
+    const buildTools = path.join(root, "build-tools");
+    if (!fs.existsSync(buildTools)) continue;
+    const versions = fs
+      .readdirSync(buildTools)
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+      .reverse();
+    for (const version of versions) {
+      for (const exe of ["aapt2.exe", "aapt2"]) {
+        const candidate = path.join(buildTools, version, exe);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+function runAapt2(aapt2, apkPath) {
+  try {
+    return execFileSync(aapt2, ["dump", "xmltree", "--file", "AndroidManifest.xml", apkPath], {
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
 }
 
 function main() {
@@ -112,12 +146,50 @@ function main() {
     if (!names.includes(asset)) problems.push(`APK 缺少 ${asset}`);
   }
 
-  // 4) extractNativeLibs：AndroidManifest.xml 是二进制 XML，直接找字符串太脆，
-  //    这里退而求其次——检查 lib 是否为 stored（未压缩）打包，
-  //    这正是 useLegacyPackaging=true + extractNativeLibs=true 的特征。
-  const prootEntry = apk.read("lib/arm64-v8a/libproot.so");
-  if (prootEntry && prootEntry.length !== fs.statSync(path.join(JNI_DIR, "libproot.so")).size) {
-    problems.push("libproot.so 在 APK 中长度异常");
+  // 4) 原生库的存放方式：
+  //    AGP 在 useLegacyPackaging=true 时会把 .so「压缩」进 APK，同时把 manifest 里的
+  //    extractNativeLibs 置为 true，安装时由系统解压到 nativeLibraryDir（proot 才能执行）。
+  //    所以压缩是**预期行为**，这里只做记录；真正的判据用 aapt2 校验 manifest（见第 5 步）。
+  const libMethods = REQUIRED_LIBS.map((lib) => `${lib}=${apk.methodOf(`lib/arm64-v8a/${lib}`) ?? "missing"}`);
+  if (libMethods.some((entry) => entry.endsWith("=missing"))) {
+    problems.push(`APK 缺少原生库：${libMethods.join(", ")}`);
+  }
+
+  // 5) 有 aapt2 的话，进一步核对合并后的 manifest（extractNativeLibs / 组件 / FGS 类型）
+  const aapt2 = findAapt2();
+  if (aapt2) {
+    const dump = runAapt2(aapt2, apkPath);
+    if (dump == null) {
+      console.warn("[verify-apk] 有 aapt2 但解析 manifest 失败，跳过 manifest 校验");
+    } else {
+      const expectations = [
+        ["extractNativeLibs", /extractNativeLibs\(0x010104ea\)=true/],
+        ["前台服务类型 SPECIAL_USE", /foregroundServiceType\(0x01010599\)=0x40000000/],
+        ["MainActivity", /"dev\.pocket\.opencode\.MainActivity"/],
+        ["ServerService", /"dev\.pocket\.opencode\.service\.ServerService"/],
+        ["ShizukuProvider", /"rikka\.shizuku\.ShizukuProvider"/],
+      ];
+      for (const [label, pattern] of expectations) {
+        if (!pattern.test(dump)) problems.push(`manifest 校验失败：${label}`);
+      }
+    }
+  } else {
+    console.warn("[verify-apk] 没有找到 aapt2（设置 ANDROID_HOME 或用 CI 跑），跳过 manifest 校验");
+  }
+
+  // 6) Shizuku 用户服务是「按类名从 APK 加载」的（不是 manifest 组件，R8 也不能改名）：
+  //    直接在 dex 里找类名，精简包尤其依赖这条。
+  const dexNames = names.filter((name) => /^classes\d*\.dex$/.test(name));
+  const dexHas = (needle) =>
+    dexNames.some((dex) => {
+      const bytes = apk.read(dex);
+      return bytes && bytes.includes(Buffer.from(needle));
+    });
+  if (!dexHas("dev/pocket/opencode/service/DeviceShellUserService")) {
+    problems.push("dex 里找不到 DeviceShellUserService（Shizuku 用户服务会加载失败）");
+  }
+  if (!dexHas("dev/pocket/opencode/IDeviceShellService")) {
+    problems.push("dex 里找不到 IDeviceShellService（AIDL 接口缺失）");
   }
 
   if (problems.length) {
@@ -126,7 +198,8 @@ function main() {
     process.exit(1);
   }
   console.log(
-    `[verify-apk] 通过：${REQUIRED_LIBS.length} 个原生库字节一致，${REQUIRED_ASSETS.length} 个脚本齐全，ABI=${[...abis].join(",")}`,
+    `[verify-apk] 通过：${REQUIRED_LIBS.length} 个原生库字节一致，${REQUIRED_ASSETS.length} 个脚本齐全，ABI=${[...abis].join(",")}，` +
+      `打包方式：${libMethods.join(" ")}`,
   );
 }
 

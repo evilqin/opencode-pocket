@@ -102,6 +102,9 @@ private sealed interface TermLine {
     data class Note(val text: String, val error: Boolean = false) : TermLine
 }
 
+private const val MAX_TERMINAL_LINES = 800
+private const val MAX_LOG_LINES = 1200
+
 @Composable
 private fun CommandRunner(engine: PocketEngine) {
     val scope = rememberCoroutineScope()
@@ -134,9 +137,10 @@ private fun CommandRunner(engine: PocketEngine) {
                         cwd = line.removePrefix("__POCKET_PWD__").trim()
                     } else if (line.isNotEmpty()) {
                         lines.add(TermLine.Output(line))
+                        // 长输出命令（cat/find 之类）运行期间就要裁剪，否则内存线性增长
+                        while (lines.size > MAX_TERMINAL_LINES) lines.removeAt(0)
                     }
                 }
-                while (lines.size > 800) lines.removeAt(0)
             } catch (error: Exception) {
                 lines.add(TermLine.Note("执行失败：${error.message}", error = true))
             } finally {
@@ -145,7 +149,7 @@ private fun CommandRunner(engine: PocketEngine) {
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().imePadding()) {
         Box(
             Modifier
                 .weight(1f)
@@ -214,8 +218,7 @@ private fun CommandRunner(engine: PocketEngine) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 6.dp, top = 6.dp)
-                .imePadding(),
+                .padding(start = 12.dp, end = 6.dp, top = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedTextField(
@@ -251,11 +254,16 @@ private fun CommandRunner(engine: PocketEngine) {
 private fun LogPanel(engine: PocketEngine, isInstallLog: Boolean, emptyText: String) {
     val context = LocalContext.current
     val lines = remember { mutableStateListOf<String>() }
+    // 历史来自各层自己的环形缓冲（先灌一遍），之后只消费新日志；
+    // 这样「清屏」不会因为 SharedFlow 的 replay 被重新灌回来。
     LaunchedEffect(isInstallLog) {
+        val history = if (isInstallLog) engine.installer.recentLogs.value else engine.server.recentLogs.value
+        lines.clear()
+        lines.addAll(history.takeLast(MAX_LOG_LINES))
         val flow = if (isInstallLog) engine.installer.logs else engine.server.logs
         flow.collect { line ->
             lines.add(line)
-            if (lines.size > 1200) lines.removeAt(0)
+            while (lines.size > MAX_LOG_LINES) lines.removeAt(0)
         }
     }
     Column(Modifier.fillMaxSize()) {
@@ -275,7 +283,11 @@ private fun LogPanel(engine: PocketEngine, isInstallLog: Boolean, emptyText: Str
             TextButton(onClick = { copyToClipboard(context, lines.joinToString("\n"), "日志已复制") }) {
                 Text("复制")
             }
-            TextButton(onClick = { lines.clear() }) { Text("清屏") }
+            TextButton(onClick = {
+                lines.clear()
+                // 同时清掉源缓冲，否则切走再回来历史又回来了
+                if (isInstallLog) engine.installer.clearLogs() else engine.server.clearRecentLogs()
+            }) { Text("清屏") }
         }
         if (lines.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

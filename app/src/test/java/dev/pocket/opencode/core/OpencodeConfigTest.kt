@@ -24,7 +24,7 @@ class OpencodeConfigTest {
 
     @Test
     fun `生成的 JSON 包含模型 端口 权限与快照设置`() {
-        val json = JSONObject(OpencodeConfig.build(settings, "/root/workspace"))
+        val json = JSONObject(OpencodeConfig.build(settings))
         assertEquals("deepseek/deepseek-chat", json.getString("model"))
         assertEquals(false, json.getBoolean("autoupdate"))
         assertEquals("disabled", json.getString("share"))
@@ -37,7 +37,7 @@ class OpencodeConfigTest {
 
     @Test
     fun `密钥写进 provider options`() {
-        val json = JSONObject(OpencodeConfig.build(settings, "/root/workspace"))
+        val json = JSONObject(OpencodeConfig.build(settings))
         val provider = json.getJSONObject("provider")
         assertEquals("sk-test-123", provider.getJSONObject("deepseek").getJSONObject("options").getString("apiKey"))
         val custom = provider.getJSONObject("openai-compatible").getJSONObject("options")
@@ -50,7 +50,6 @@ class OpencodeConfigTest {
         val json = JSONObject(
             OpencodeConfig.build(
                 settings.copy(providerKeys = emptyMap(), providerBaseUrls = emptyMap()),
-                "/root/workspace",
             ),
         )
         assertFalse(json.has("provider"))
@@ -62,12 +61,25 @@ class OpencodeConfigTest {
             settings.copy(lowMemory = true, disableWatcher = false),
         )
         assertEquals("sk-test-123", env["DEEPSEEK_API_KEY"])
-        assertEquals("https://api.example.com/v1", env["OPENAI_BASE_URL"])
+        // 自定义端点的 baseURL 不能塞进全局 OPENAI_BASE_URL，否则会污染真正的 OpenAI provider
+        assertFalse(env.containsKey("OPENAI_BASE_URL"))
         assertEquals("1", env["OPENCODE_DISABLE_AUTOUPDATE"])
         assertEquals("1", env["OPENCODE_DISABLE_LSP_DOWNLOAD"])
         // 低内存模式同时关掉文件监视
         assertEquals("1", env["OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER"])
         assertTrue(env.containsKey("BROWSER"))
+    }
+
+    @Test
+    fun `自定义 OpenAI 兼容端点会生成 npm 与 models`() {
+        val json = JSONObject(OpencodeConfig.build(settings.copy(defaultModel = "openai-compatible/my-model")))
+        val custom = json.getJSONObject("provider").getJSONObject("openai-compatible")
+        assertEquals("@ai-sdk/openai-compatible", custom.getString("npm"))
+        assertTrue(custom.getJSONObject("models").has("my-model"))
+        assertEquals(
+            "https://api.example.com/v1",
+            custom.getJSONObject("options").getString("baseURL"),
+        )
     }
 
     @Test

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -36,7 +37,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -278,7 +281,7 @@ fun LabeledProgress(
     }
 }
 
-/** 终端风格的日志控件，自动吸底。 */
+/** 终端风格的日志控件，仅在用户停留在底部附近时自动吸底。 */
 @Composable
 fun LogConsole(
     lines: List<String>,
@@ -286,8 +289,16 @@ fun LogConsole(
     autoFollow: Boolean = true,
 ) {
     val state = rememberLazyListState()
-    LaunchedEffect(lines.size, autoFollow) {
-        if (autoFollow && lines.isNotEmpty()) {
+    // 用户手动上翻查看历史时不要强行拉回底部
+    val atBottom by remember {
+        derivedStateOf {
+            val info = state.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            last == null || last.index >= info.totalItemsCount - 2
+        }
+    }
+    LaunchedEffect(lines.size, autoFollow, atBottom) {
+        if (autoFollow && atBottom && lines.isNotEmpty()) {
             state.scrollToItem(lines.size - 1)
         }
     }
@@ -412,7 +423,7 @@ fun KeyValueRow(key: String, value: String, modifier: Modifier = Modifier) {
             key,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(96.dp),
+            modifier = Modifier.widthIn(min = 72.dp).padding(end = 12.dp),
         )
         Text(value, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
     }

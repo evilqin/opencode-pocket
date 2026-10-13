@@ -138,7 +138,7 @@ private fun SessionList(
         try {
             val loaded = engine.api.sessions()
             sessions.clear()
-            sessions.addAll(loaded)
+            sessions.addAll(loaded.distinctBy { it.id })
         } catch (exception: Exception) {
             error = exception.message
         }
@@ -232,6 +232,7 @@ private fun SessionList(
                 scope.launch {
                     try {
                         val created = engine.api.createSession()
+                        sessions.removeAll { it.id == created.id }
                         sessions.add(0, created)
                         onOpen(created)
                     } catch (exception: Exception) {
@@ -336,6 +337,18 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
     var selectedModel by mutableStateOf<Pair<String, String>?>(null)
     var selectedAgent by mutableStateOf<String?>(null)
 
+    /** 事件流重连过，需要补拉一次历史。 */
+    var pendingResync by mutableStateOf(false)
+
+    /** 只重拉消息（不动 loading 状态，供 resync 使用）。 */
+    suspend fun reloadMessages() {
+        runCatching { engine.api.messages(session.id) }.onSuccess { history ->
+            val merged = history.sortedWith(compareBy({ it.info.created }, { it.info.id }))
+            messages.clear()
+            messages.addAll(merged)
+        }
+    }
+
     suspend fun load() {
         loading = true
         error = null
@@ -362,6 +375,11 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
 
     fun handleEvent(event: JSONObject) {
         val type = event.optString("type")
+        if (type == "resync") {
+            // 事件流重连过：补拉一次历史，避免漏事件
+            pendingResync = true
+            return
+        }
         val props = event.optJSONObject("properties") ?: return
         when (type) {
             "message.updated" -> {
@@ -375,14 +393,18 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
                 } else {
                     messages.add(ChatMessage(info, emptyList()))
                     sortMessages()
+                    // 只有“新出现的用户消息”才意味着刚提交了一轮请求；
+                    // 历史回灌（事件流重连等）不该把界面标成“正在思考”
+                    if (info.isUser) busy = true
                 }
-                if (info.isUser) busy = true
-                else if (info.completed != null) busy = false
+                if (!info.isUser && info.completed != null) busy = false
             }
 
             "message.part.updated" -> {
                 val partJson = props.optJSONObject("part") ?: return
-                if (partJson.optString("sessionID") != session.id) return
+                // 某些版本的 Part 不带 sessionID：为空时也接受（消息 id 会兜底）
+                val partSession = partJson.optString("sessionID")
+                if (partSession.isNotBlank() && partSession != session.id) return
                 val part = Parsers.part(partJson) ?: return
                 upsertPart(part)
             }
@@ -403,8 +425,11 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
 
             "session.idle" -> if (props.optString("sessionID") == session.id) busy = false
 
-            "session.status" -> if (props.optString("sessionID") == session.id) {
-                busy = props.optJSONObject("status")?.optString("type") == "busy" || busy
+            "session.status" -> {
+                val status = props.optJSONObject("status")?.optString("type") ?: return
+                if (props.optString("sessionID") == session.id) {
+                    busy = status == "busy" || status == "retry"
+                }
             }
 
             "session.updated" -> {
@@ -413,8 +438,10 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
             }
 
             "session.error" -> {
-                error = Parsers.formatError(props.optJSONObject("error"))
-                    ?: props.optJSONObject("error")?.optString("name")
+                if (props.optString("sessionID") == session.id) {
+                    error = Parsers.formatError(props.optJSONObject("error"))
+                        ?: props.optJSONObject("error")?.optString("name")
+                }
             }
 
             "permission.updated" -> {
@@ -454,8 +481,10 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
     }
 
     suspend fun send(text: String) {
-        if (text.isBlank() || busy) return
-        busy = true
+        if (text.isBlank()) {
+            busy = false
+            return
+        }
         error = null
         try {
             engine.api.promptAsync(session.id, text, selectedModel, selectedAgent)
@@ -465,14 +494,32 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
         }
     }
 
+    /**
+     * 同步抢锁：返回 false 表示上一条还在跑，调用方**不要**清空输入框。
+     * （放进协程里判断会有竞态：连点两下会静默吞掉第二段草稿。）
+     */
+    fun tryStartSend(): Boolean {
+        if (busy) return false
+        busy = true
+        return true
+    }
+
     suspend fun abort() {
         runCatching { engine.api.abort(session.id) }
         busy = false
     }
 
     suspend fun replyPermission(request: PermissionRequest, response: String) {
+        val removed = permissions.filter { it.id == request.id }
         permissions.removeAll { it.id == request.id }
-        runCatching { engine.api.replyPermission(session.id, request.id, response) }
+        val result = runCatching { engine.api.replyPermission(session.id, request.id, response) }
+        if (result.isFailure) {
+            // 失败就把卡片放回去，别让用户以为已经答复了
+            if (removed.isNotEmpty() && permissions.none { it.id == request.id }) {
+                permissions.addAll(removed)
+            }
+            error = "授权回复失败：${result.exceptionOrNull()?.message ?: "请重试"}"
+        }
     }
 
     suspend fun rename(newTitle: String) {
@@ -499,9 +546,17 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
         engine.api.events().collect { event -> chat.handleEvent(event) }
     }
 
-    LaunchedEffect(chat.messages.size, chat.permissions.size) {
-        val total = chat.messages.size + chat.permissions.size
-        if (total > 0) listState.animateScrollToItem((total - 1).coerceAtLeast(0))
+    // 事件流重连过：补拉一次历史
+    LaunchedEffect(chat.pendingResync) {
+        if (chat.pendingResync) {
+            chat.pendingResync = false
+            chat.reloadMessages()
+        }
+    }
+
+    LaunchedEffect(chat.messages.size, chat.permissions.size, chat.busy) {
+        val total = chat.messages.size + chat.permissions.size + if (chat.busy) 1 else 0
+        if (total > 0) listState.animateScrollToItem(total - 1)
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -653,9 +708,11 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                             capitalization = KeyboardCapitalization.Sentences,
                         ),
                         keyboardActions = KeyboardActions(onSend = {
-                            val text = input
-                            input = ""
-                            scope.launch { chat.send(text) }
+                            if (chat.tryStartSend()) {
+                                val text = input
+                                input = ""
+                                scope.launch { chat.send(text) }
+                            }
                         }),
                     )
                     Spacer(Modifier.width(8.dp))
@@ -668,9 +725,11 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                     } else {
                         Button(
                             onClick = {
-                                val text = input
-                                input = ""
-                                scope.launch { chat.send(text) }
+                                if (chat.tryStartSend()) {
+                                    val text = input
+                                    input = ""
+                                    scope.launch { chat.send(text) }
+                                }
                             },
                             enabled = input.isNotBlank(),
                         ) {

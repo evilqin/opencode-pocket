@@ -36,8 +36,11 @@ object OpencodeConfig {
 
     fun findProvider(id: String): Provider? = providers.firstOrNull { it.id == id }
 
+    /** 自定义 OpenAI 兼容 provider 的 id（需要额外生成 npm/name/models）。 */
+    const val CUSTOM_PROVIDER_ID = "openai-compatible"
+
     /** 生成 opencode.json。 */
-    fun build(settings: AppSettings, workspace: String): String {
+    fun build(settings: AppSettings): String {
         val root = JSONObject()
         root.put("\$schema", "https://opencode.ai/config.json")
         root.put("autoupdate", false)
@@ -85,6 +88,20 @@ object OpencodeConfig {
                 settings.providerBaseUrls[id]?.takeIf { it.isNotBlank() }?.let { options.put("baseURL", it.trim()) }
                 if (options.length() > 0) {
                     entry.put("options", options)
+                }
+                if (id == CUSTOM_PROVIDER_ID) {
+                    // 自定义 OpenAI 兼容端点：opencode 需要 npm/name/models 才知道怎么调它
+                    entry.put("npm", "@ai-sdk/openai-compatible")
+                    entry.put("name", "自定义 OpenAI 兼容")
+                    val modelId = settings.defaultModel
+                        .takeIf { it.startsWith("$CUSTOM_PROVIDER_ID/") }
+                        ?.substringAfter('/')
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "default"
+                    entry.put("models", JSONObject().put(modelId, JSONObject().put("name", modelId)))
+                    entry.put("options", options)
+                }
+                if (entry.length() > 0) {
                     providerObject.put(id, entry)
                 }
             }
@@ -102,10 +119,8 @@ object OpencodeConfig {
             if (key.isBlank()) continue
             findProvider(id)?.env?.let { env[it] = key.trim() }
         }
-        // 自定义 baseURL 的 OpenAI 兼容端点
-        settings.providerBaseUrls["openai-compatible"]?.takeIf { it.isNotBlank() }?.let {
-            env["OPENAI_BASE_URL"] = it.trim()
-        }
+        // 自定义端点的 baseURL 只写进 provider.options，不要塞进 OPENAI_BASE_URL，
+        // 否则会把真正的 OpenAI provider 也指到自定义地址上。
         env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
         env["OPENCODE_DISABLE_TERMINAL_TITLE"] = "1"
         env["BROWSER"] = "/bin/true"

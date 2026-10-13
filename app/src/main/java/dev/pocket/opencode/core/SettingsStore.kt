@@ -64,6 +64,9 @@ data class AppSettings(
     /** 外观。 */
     val themeMode: String = "dark",
     val dynamicColor: Boolean = false,
+
+    /** 是否已经弹过一次通知权限（避免每次冷启动都打扰用户）。 */
+    val notificationAsked: Boolean = false,
 )
 
 class SettingsStore(private val context: Context) {
@@ -123,6 +126,7 @@ class SettingsStore(private val context: Context) {
                 smallModel = json.optString("smallModel", defaults.smallModel),
                 themeMode = json.optString("themeMode", defaults.themeMode),
                 dynamicColor = json.optBoolean("dynamicColor", defaults.dynamicColor),
+                notificationAsked = json.optBoolean("notificationAsked", defaults.notificationAsked),
             )
         } catch (_: Exception) {
             AppSettings()
@@ -156,6 +160,7 @@ class SettingsStore(private val context: Context) {
         json.put("smallModel", value.smallModel)
         json.put("themeMode", value.themeMode)
         json.put("dynamicColor", value.dynamicColor)
+        json.put("notificationAsked", value.notificationAsked)
         return json.toString()
     }
 }

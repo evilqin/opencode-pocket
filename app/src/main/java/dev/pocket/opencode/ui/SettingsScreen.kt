@@ -53,7 +53,9 @@ import dev.pocket.opencode.ui.components.SettingRow
 import dev.pocket.opencode.ui.components.copyToClipboard
 import dev.pocket.opencode.ui.theme.PocketColors
 import dev.pocket.opencode.util.DevicePermissions
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 
 private const val SHIZUKU_REQUEST_CODE = 4210
@@ -76,6 +78,7 @@ fun SettingsScreen(engine: PocketEngine) {
     val scope = rememberCoroutineScope()
     val settings by engine.settings.settings.collectAsStateWithLifecycle()
     val versions by engine.installer.versions.collectAsStateWithLifecycle()
+    val install by engine.installer.state.collectAsStateWithLifecycle()
     val server by engine.server.status.collectAsStateWithLifecycle()
     val bridge by engine.deviceShell.status.collectAsStateWithLifecycle()
     var dialog by remember { mutableStateOf<SettingsDialog?>(null) }
@@ -154,16 +157,37 @@ fun SettingsScreen(engine: PocketEngine) {
         }
 
         item {
-            Button(
-                onClick = {
-                    scope.launch {
-                        // 把最新设置重新写进容器并重启服务
-                        engine.installer.reinstall(dev.pocket.opencode.core.InstallStep.CONFIG)
-                        if (server.running) engine.startServer(restart = true)
+            Column {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            // 把最新设置重新写进容器；服务在跑就顺带重启让它生效
+                            engine.installer.reinstall(dev.pocket.opencode.core.InstallStep.CONFIG)
+                            if (engine.server.isAlive()) engine.startServer(restart = true)
+                        }
+                    },
+                    enabled = install.running == null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (install.running == dev.pocket.opencode.core.InstallStep.CONFIG) {
+                        androidx.compose.material3.CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("正在写入配置…")
+                    } else {
+                        Text(if (server.running) "保存并重启服务" else "保存配置")
                     }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("保存并重启服务") }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    if (server.running) {
+                        "密钥、模型与权限会立刻生效（服务会重启一次）。"
+                    } else {
+                        "服务当前没在运行：配置已保存，下次启动服务时生效。"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
 
         item {
@@ -325,7 +349,13 @@ fun SettingsScreen(engine: PocketEngine) {
                                 checked = settings.deviceShell,
                                 onCheckedChange = { value ->
                                     scope.launch {
-                                        engine.settings.update { it.copy(deviceShell = value) }
+                                        // 每次开启都换一把新令牌，关掉即失效
+                                        engine.settings.update { current ->
+                                            current.copy(
+                                                deviceShell = value,
+                                                deviceShellToken = if (value) "" else current.deviceShellToken,
+                                            )
+                                        }
                                         engine.deviceShell.syncNow()
                                     }
                                 },
@@ -443,8 +473,12 @@ fun SettingsScreen(engine: PocketEngine) {
                     SettingRow(
                         icon = PocketIcons.Download,
                         title = "更新 OpenCode",
-                        subtitle = "从当前 npm 镜像拉取最新版（${Mirrors.find(Mirrors.npm, settings.npmMirror).name}）",
-                        value = versions["opencode"].orEmpty(),
+                        subtitle = when {
+                            install.running == dev.pocket.opencode.core.InstallStep.OPENCODE -> "正在下载并替换…"
+                            versions["opencode"] != null ->
+                                "当前 v${versions["opencode"]} · 点一下拉取最新版（${Mirrors.find(Mirrors.npm, settings.npmMirror).name}）"
+                            else -> "从 ${Mirrors.find(Mirrors.npm, settings.npmMirror).name} 拉取最新版"
+                        },
                         onClick = { scope.launch { engine.installer.updateOpencode() } },
                     )
                     SettingRow(
@@ -459,16 +493,25 @@ fun SettingsScreen(engine: PocketEngine) {
                         subtitle = "把服务与安装日志发出去排查问题",
                         onClick = {
                             scope.launch {
+                                // 日志可能几十 MB，读写在 IO 线程做，避免 ANR
+                                val file = withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        val target = engine.paths.exportDir.resolve("opencode-pocket-logs.txt")
+                                        target.writeText(
+                                            buildString {
+                                                appendLine("== install.log ==")
+                                                appendLine(engine.paths.installLog.takeIf { it.isFile }?.readText().orEmpty())
+                                                appendLine("== server.log ==")
+                                                appendLine(engine.paths.serverLog.takeIf { it.isFile }?.readText().orEmpty())
+                                            },
+                                        )
+                                        target
+                                    }.getOrNull()
+                                }
+                                if (file == null) {
+                                    return@launch
+                                }
                                 runCatching {
-                                    val file = engine.paths.exportDir.resolve("opencode-pocket-logs.txt")
-                                    file.writeText(
-                                        buildString {
-                                            appendLine("== install.log ==")
-                                            appendLine(engine.paths.installLog.takeIf { it.isFile }?.readText().orEmpty())
-                                            appendLine("== server.log ==")
-                                            appendLine(engine.paths.serverLog.takeIf { it.isFile }?.readText().orEmpty())
-                                        },
-                                    )
                                     val uri = androidx.core.content.FileProvider.getUriForFile(
                                         context,
                                         "${context.packageName}.files",
@@ -509,7 +552,7 @@ fun SettingsScreen(engine: PocketEngine) {
                 Spacer(Modifier.height(8.dp))
                 PocketCard {
                     Text(
-                        "OpenCode 口袋 1.0.0",
+                        "OpenCode 口袋 ${dev.pocket.opencode.BuildConfig.VERSION_NAME}",
                         style = MaterialTheme.typography.titleSmall,
                     )
                     Spacer(Modifier.height(6.dp))

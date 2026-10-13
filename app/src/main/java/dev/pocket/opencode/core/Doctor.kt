@@ -166,9 +166,16 @@ class Doctor(
         {
             val config = settings.snapshot()
             val occupied = withContext(Dispatchers.IO) { isPortOccupied(config.port) }
-            when {
-                !occupied -> Check("服务端口", Status.OK, "127.0.0.1:${config.port} 空闲")
-                else -> Check("服务端口", Status.WARN, "127.0.0.1:${config.port} 已被占用，换一个端口或重启服务")
+            if (!occupied) {
+                Check("服务端口", Status.OK, "127.0.0.1:${config.port} 空闲")
+            } else {
+                // 自己正在跑的时候端口当然是被占用的，先问一句健康检查
+                val healthy = withContext(Dispatchers.IO) { isOurServer(config.port) }
+                if (healthy) {
+                    Check("服务端口", Status.OK, "127.0.0.1:${config.port} 是本应用的服务（健康检查通过）")
+                } else {
+                    Check("服务端口", Status.WARN, "127.0.0.1:${config.port} 被其它进程占用，换一个端口")
+                }
             }
         },
 
@@ -209,6 +216,20 @@ class Doctor(
     private fun isPortOccupied(port: Int): Boolean = try {
         Socket().use { socket -> socket.connect(InetSocketAddress("127.0.0.1", port), 300) }
         true
+    } catch (_: Exception) {
+        false
+    }
+
+    /** 端口上是不是我们自己的 opencode 服务（看健康检查接口）。 */
+    private fun isOurServer(port: Int): Boolean = try {
+        java.net.URL("http://127.0.0.1:$port/global/health").openConnection().let { connection ->
+            (connection as java.net.HttpURLConnection).apply {
+                connectTimeout = 1_500
+                readTimeout = 1_500
+            }
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            body.contains("healthy")
+        }
     } catch (_: Exception) {
         false
     }

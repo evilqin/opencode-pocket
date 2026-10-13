@@ -76,10 +76,11 @@ fun HomeScreen(
     var showDoctor by remember { mutableStateOf(false) }
 
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(1000)
+    // 只在服务运行时每秒刷新「已运行时长」；其他状态下不要白白重组整个首页
+    LaunchedEffect(server.phase) {
+        while (server.phase == ServerPhase.RUNNING) {
             now = System.currentTimeMillis()
+            delay(1000)
         }
     }
 
@@ -87,7 +88,14 @@ fun HomeScreen(
         value = withContext(Dispatchers.IO) { engine.shell.hostSize(engine.paths.home) }
     }
 
-    val workspace = remember(settings) { engine.proot.resolveWorkspace(settings) }
+    // 工作区解析涉及磁盘探测（mkdirs/canWrite），放到 IO 线程，避免组合期卡主线程
+    val workspace by produceState<dev.pocket.opencode.core.Proot.Workspace?>(
+        initialValue = null,
+        settings.useExternalWorkspace,
+        settings.workspace,
+    ) {
+        value = withContext(Dispatchers.IO) { engine.proot.resolveWorkspace(settings) }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -199,7 +207,11 @@ fun HomeScreen(
                     KeyValueRow("系统", versions["ubuntu"]?.let { "Ubuntu $it" } ?: "未安装")
                     KeyValueRow("OpenCode", versions["opencode"] ?: "未安装")
                     KeyValueRow("Node.js", versions["node"]?.let { "v${it.trimStart('v')}" } ?: "未安装（可选）")
-                    KeyValueRow("工作区", workspace.host.absolutePath + if (workspace.external) "" else "（内部）")
+                    KeyValueRow(
+                        "工作区",
+                        workspace?.let { it.host.absolutePath + if (it.external) "" else "（内部）" }
+                            ?: settings.workspace,
+                    )
                     KeyValueRow("占用空间", Format.bytes(diskUsage))
                     KeyValueRow("模型", settings.defaultModel.ifBlank { "跟随默认" })
                 }
@@ -211,14 +223,24 @@ fun HomeScreen(
                 SectionHeader("快捷操作")
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val updatingOpencode = install.running == dev.pocket.opencode.core.InstallStep.OPENCODE
                     FilledTonalButton(
                         onClick = { scope.launch { engine.installer.updateOpencode() } },
                         enabled = install.installed && install.running == null,
                         modifier = Modifier.weight(1f),
                     ) {
-                        Icon(PocketIcons.Download, null, Modifier.size(17.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("更新 OpenCode", style = MaterialTheme.typography.labelMedium)
+                        if (updatingOpencode) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("更新中…", style = MaterialTheme.typography.labelMedium)
+                        } else {
+                            Icon(PocketIcons.Download, null, Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("更新 OpenCode", style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                     FilledTonalButton(onClick = { showDoctor = true }, modifier = Modifier.weight(1f)) {
                         Icon(PocketIcons.Shield, null, Modifier.size(17.dp))

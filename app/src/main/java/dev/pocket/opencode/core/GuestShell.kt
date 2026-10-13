@@ -1,17 +1,24 @@
 package dev.pocket.opencode.core
 
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import java.io.File
 
 /**
  * 在容器里跑一条命令并流式回收输出（stdout+stderr 合并）。
+ *
+ * 几个必须做对的点（都是踩过的坑）：
+ *   - 子进程的 stdin 立刻关掉：默认是管道且永不 EOF，`dpkg`/`cat`/任何读 stdin 的命令会永久挂死；
+ *   - 超时用「看门狗杀进程」实现，而不是 `withTimeout`（阻塞的 readLine 不响应协程取消）；
+ *   - 取消同样落到进程上（kill 掉 proot，`--kill-on-exit` 会带走整棵进程树）；
+ *   - 输出行数有上限，避免 `yes` / 编译日志把内存打爆。
  */
 class GuestShell(private val proot: Proot) {
 
@@ -19,48 +26,99 @@ class GuestShell(private val proot: Proot) {
         val exitCode: Int,
         val lines: List<String>,
         val timedOut: Boolean = false,
+        val dropped: Int = 0,
     ) {
         val text: String get() = lines.joinToString("\n")
         val success: Boolean get() = exitCode == 0 && !timedOut
     }
 
-    class TimeoutException(val partial: List<String>) : Exception("命令超时")
+    class TimeoutException(val partial: List<String>) :
+        Exception("命令超时（已强制结束）")
 
+    /**
+     * @param keepLastLines 只保留最后 N 行（默认 4000），再多就丢掉最老的并计数
+     * @param isCanceled 取消探测（由上层传入，例如安装页的取消按钮）
+     */
     suspend fun run(
         command: String,
         config: AppSettings,
         extraEnv: Map<String, String> = emptyMap(),
         cwd: String = PocketPaths.Guest.ROOT,
         timeoutMs: Long = 0,
+        keepLastLines: Int = 4000,
+        isCanceled: () -> Boolean = { false },
         onLine: (String) -> Unit = {},
     ): Output {
-        val process = withContext(Dispatchers.IO) { proot.start(command, config, extraEnv, cwd) }
-        val lines = ArrayList<String>(256)
-        try {
-            val completed = withTimeoutOrNull(if (timeoutMs > 0) timeoutMs else Long.MAX_VALUE) {
-                withContext(Dispatchers.IO) {
-                    val reader = BufferedReader(InputStreamReader(process.inputStream), 64 * 1024)
-                    while (true) {
-                        val line = reader.readLine() ?: break
-                        lines += line
-                        onLine(line)
-                    }
-                }
-                process.waitFor()
+        val process = withContext(Dispatchers.IO) {
+            proot.start(command, config, extraEnv, cwd).also {
+                // 不给 stdin 留管道：读 stdin 的命令立刻拿到 EOF 而不是挂死
+                runCatching { it.outputStream.close() }
             }
-            if (completed == null) throw TimeoutException(lines)
-            return Output(process.exitValue(), lines)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
+        }
+        val lines = ArrayDeque<String>()
+        var dropped = 0
+        var timedOut = false
+        var cancelled = false
+
+        try {
+            coroutineScope {
+                val watchdog = if (timeoutMs > 0) {
+                    launch(Dispatchers.IO) {
+                        delay(timeoutMs)
+                        timedOut = true
+                        runCatching { process.destroy() }
+                        delay(1_500)
+                        runCatching { process.destroyForcibly() }
+                    }
+                } else {
+                    null
+                }
+                try {
+                    withContext(Dispatchers.IO) {
+                        val reader = BufferedReader(InputStreamReader(process.inputStream), 64 * 1024)
+                        while (true) {
+                            if (isCanceled()) {
+                                cancelled = true
+                                runCatching { process.destroyForcibly() }
+                                break
+                            }
+                            val line = reader.readLine() ?: break
+                            synchronized(lines) {
+                                lines.addLast(line)
+                                while (lines.size > keepLastLines) {
+                                    lines.removeFirst()
+                                    dropped++
+                                }
+                            }
+                            onLine(line)
+                        }
+                    }
+                    // 进程此时要么已经退出，要么被看门狗/取消杀掉
+                    runCatching { process.waitFor() }
+                } finally {
+                    watchdog?.cancel()
+                }
+            }
+        } catch (cancelledException: CancellationException) {
+            runCatching { process.destroyForcibly() }
+            throw cancelledException
         } finally {
             withContext(NonCancellable) {
                 if (process.isAlive) {
                     process.destroy()
-                    delay(900)
+                    delay(600)
                     if (process.isAlive) process.destroyForcibly()
                 }
             }
         }
+
+        if (cancelled) throw CancellationException("命令已取消")
+        if (timedOut) throw TimeoutException(lines.toList())
+        return Output(
+            exitCode = runCatching { process.exitValue() }.getOrDefault(-1),
+            lines = lines.toList(),
+            dropped = dropped,
+        )
     }
 
     /** 便捷方法：跑一条命令并把输出拿到手（默认 5 分钟超时）。 */
@@ -69,12 +127,12 @@ class GuestShell(private val proot: Proot) {
         config: AppSettings,
         extraEnv: Map<String, String> = emptyMap(),
         timeoutMs: Long = 300_000,
+        isCanceled: () -> Boolean = { false },
         onLine: (String) -> Unit = {},
-    ): Output = run(command, config, extraEnv, timeoutMs = timeoutMs, onLine = onLine)
+    ): Output = run(command, config, extraEnv, timeoutMs = timeoutMs, isCanceled = isCanceled, onLine = onLine)
 
     /**
-     * 交互式 shell：返回进程，调用方负责写 stdin 与读 stdout。
-     * 命令骨架：`bash --login` + 每次执行后打印 cwd 标记，便于终端页做“像 shell 一样”的体验。
+     * 交互式 shell：返回进程，调用方负责写 stdin 与读 stdout（stdin 保持打开）。
      */
     fun startInteractive(config: AppSettings, extraEnv: Map<String, String> = emptyMap()): Process =
         proot.start("/bin/bash --login", config, extraEnv)
@@ -92,13 +150,6 @@ class GuestShell(private val proot: Proot) {
         return output.text.trim() == "yes"
     }
 
-    /** 宿主侧目录大小（不动容器）。 */
-    fun hostSize(dir: File): Long {
-        if (!dir.exists()) return 0
-        var total = 0L
-        dir.walkTopDown().forEach { file ->
-            if (file.isFile) total += file.length()
-        }
-        return total
-    }
+    /** 宿主侧目录大小（不跟随符号链接）。 */
+    fun hostSize(dir: File): Long = FileOps.directorySize(dir)
 }

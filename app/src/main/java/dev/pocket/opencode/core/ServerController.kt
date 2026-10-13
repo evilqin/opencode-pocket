@@ -87,7 +87,9 @@ class ServerController(
         if (isAlive()) return true
         if (startJob?.isActive == true) return false
 
-        if (!paths.rootfsLooksInstalled() || !File(paths.rootfs, "usr/local/lib/opencode/bin/opencode").isFile) {
+        if (!paths.rootfsLooksInstalled() ||
+            !File(paths.rootfs, PocketPaths.Guest.OPENCODE_BIN.trimStart('/')).isFile
+        ) {
             _status.value = _status.value.copy(
                 phase = ServerPhase.ERROR,
                 error = "容器环境还没装好",
@@ -104,10 +106,10 @@ class ServerController(
                 proot.stageBootRuntime()
                 net.writeResolvConf()
 
-                // 清掉上次残留的进程（强制杀，避免端口占用）
+                // 清掉上次残留的进程（用 [o]pencode 这种写法避免 pkill 匹配到自己这条命令行）
                 runCatching {
                     shell.run(
-                        "pkill -9 -f 'opencode' >/dev/null 2>&1; sleep 0.5; true",
+                        "pkill -9 -f '[o]pencode' >/dev/null 2>&1; sleep 0.5; true",
                         settings,
                         timeoutMs = 20_000,
                     )
@@ -132,19 +134,21 @@ class ServerController(
                 _status.value = _status.value.copy(hint = "等待服务就绪…")
                 val healthy = awaitHealthy(settings.port, timeoutMs = 240_000)
                 if (!healthy) {
-                    if (started.isAlive) {
-                        _status.value = _status.value.copy(
-                            phase = ServerPhase.ERROR,
-                            error = "服务启动超时",
-                            hint = "看一下运行日志，常见原因是没配 API Key 或者内存不足",
-                        )
-                    } else {
-                        _status.value = _status.value.copy(
-                            phase = ServerPhase.ERROR,
-                            error = "进程退出了",
-                            hint = "运行日志里有原因",
-                        )
+                    // 起不来就别让它占着端口：先杀掉再报错
+                    withContext(Dispatchers.IO) {
+                        runCatching { started.destroy() }
+                        delay(1_200)
+                        runCatching { started.destroyForcibly() }
                     }
+                    runCatching {
+                        shell.run("pkill -9 -f '[o]pencode' >/dev/null 2>&1; true", settings, timeoutMs = 20_000)
+                    }
+                    process = null
+                    _status.value = _status.value.copy(
+                        phase = ServerPhase.ERROR,
+                        error = "服务启动超时（已清理进程）",
+                        hint = "看一下运行日志：常见原因是没配 API Key、内存不足，或者端口被占用",
+                    )
                     return@launch
                 }
 
@@ -190,7 +194,7 @@ class ServerController(
         }
         runCatching {
             shell.run(
-                "pkill -9 -f 'opencode' >/dev/null 2>&1; true",
+                "pkill -9 -f '[o]pencode' >/dev/null 2>&1; true",
                 settings,
                 timeoutMs = 20_000,
             )
@@ -214,15 +218,15 @@ class ServerController(
                 val seconds = ((System.currentTimeMillis() - (deadline - timeoutMs)) / 1000)
                 appendLog("… 仍在等待服务就绪（${seconds}s）")
             }
-            val body = health()
+            val body = health(port)
             if (body != null && body.optBoolean("healthy", false)) return true
             delay(700)
         }
         return false
     }
 
-    private fun health(): JSONObject? = try {
-        val request = Request.Builder().url("${baseUrl()}/global/health").build()
+    private fun health(port: Int = _status.value.port): JSONObject? = try {
+        val request = Request.Builder().url("http://127.0.0.1:$port/global/health").build()
         healthClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) null else response.body?.string()?.let { JSONObject(it) }
         }
@@ -260,7 +264,19 @@ class ServerController(
             while (recent.size > 400) recent.removeFirst()
             _recentLogs.value = recent.toList()
         }
-        runCatching { paths.serverLog.appendText(stamped + "\n") }
+        runCatching {
+            rotateLogIfNeeded()
+            paths.serverLog.appendText(stamped + "\n")
+        }
+    }
+
+    /** 超过 1 MB 就把 server.log 转成 server.log.1，避免长期运行无限增长。 */
+    private fun rotateLogIfNeeded() {
+        val log = paths.serverLog
+        if (!log.isFile || log.length() < MAX_LOG_BYTES) return
+        val backup = File(log.parentFile, log.name + ".1")
+        backup.delete()
+        log.renameTo(backup)
     }
 
     fun clearRecentLogs() {
@@ -268,5 +284,9 @@ class ServerController(
             recent.clear()
             _recentLogs.value = emptyList()
         }
+    }
+
+    private companion object {
+        const val MAX_LOG_BYTES = 1L shl 20 // 1 MiB
     }
 }
