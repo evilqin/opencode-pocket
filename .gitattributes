@@ -1,0 +1,13 @@
+# 容器里执行的脚本必须是 LF，否则 shebang 会失效
+*.sh text eol=lf
+*.mjs text eol=lf
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+
+# 二进制
+*.so binary
+*.jar binary
+*.apk binary
+*.deb binary
+*.tgz binary
+*.xz binary

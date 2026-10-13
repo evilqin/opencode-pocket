@@ -1,0 +1,242 @@
+# OpenCode 口袋（OpenCode Pocket）
+
+把官方 [opencode](https://github.com/anomalyco/opencode) 装进一台「口袋里的 Ubuntu」——原生 Android 应用，
+内置 proot 运行时，无需 root、无需 Termux、无需电脑，手机上点几下就能用。
+
+> 参考了 [DSHA（DeepSeek Harness 安卓启动器）](https://github.com/qiannianhuanxiang/DSHA) 的容器方案：
+> Termux 官方 proot 二进制放进 APK、rootfs 放应用私有目录、多源测速、分步安装。
+> 本项目的目标是同样的“一体化”体验，但服务对象换成 opencode。
+
+---
+
+## 它是什么
+
+- **一个启动器**：内置 `proot`（Termux 官方 aarch64 构建）+ 一键安装的 Ubuntu 24.04 rootfs。
+- **一个原生客户端**：对话页直连容器里的 opencode 服务（REST + SSE），流式输出、工具调用卡片、
+  权限确认；同时也能打开官方 Web UI。
+- **一个终端**：在容器里跑任意命令，看安装日志与运行日志。
+- **完全离线可控**：所有下载都走**你选的镜像**，密钥只写入 App 私有目录，不上传任何地方。
+
+---
+
+## 功能一览
+
+| 模块 | 说明 |
+| --- | --- |
+| 一键安装 | 4 步流水线：运行时就绪 → Ubuntu rootfs → 基础工具（apt）→ OpenCode 本体；每步可单独重试、可续传 |
+| 多源测速 | Ubuntu / apt / Node / npm 四类镜像，用**真实文件**做 Range 测速（延迟 + 带宽），自动选最快 |
+| 服务管理 | 前台服务常驻，通知栏显示状态与「停止」动作；健康检查轮询 `/global/health` |
+| 原生对话 | 会话列表、流式回复、思考过程折叠、工具调用卡片、权限请求（允许一次/始终允许/拒绝）、模型与代理切换 |
+| Web UI | 内嵌 WebView 打开 `opencode web` 的官方界面，可跳外部浏览器 |
+| 终端 | 类 shell 的命令执行（cwd 保持），快捷命令；安装日志 / 运行日志各一份，可复制可分享 |
+| 设置 | 12 个常用 provider 的 API Key、默认模型、端口、权限策略、低内存模式、工作区、主题、维护工具 |
+| 工作区 | 手机上的真实目录（默认 `/sdcard/OpenCode`）挂进容器 `/root/workspace`，容器里直接读写你的项目 |
+| 一键体检 | 12 项只读检查（架构/运行时/rootfs/git/opencode/域名解析/空间/端口/密钥/权限…），结果可一键复制 |
+| 设备 Shell 桥 | 可选：通过 **Shizuku** 让容器里的 agent 用 `dexec` 在手机本体上执行命令（读设备信息、剪贴板、系统目录） |
+| 安全默认 | `share: disabled`、`autoupdate: false`、密钥写在应用私有目录、不采集任何数据 |
+
+---
+
+## 安装
+
+### 方式一：直接装 APK
+
+1. 到 [Releases](../../releases) 下载 `app-release.apk`（或自己构建，见下）。
+2. 手机需要 **ARM64**，Android **11（API 30）及以上**。
+3. 安装后打开 → 「开始安装」→ 选镜像 → 等 5 分钟左右。
+
+> 仓库里的 `dist/` 放了三份构建产物：
+> `*-arm64.apk`（标准包，27.9 MB，未混淆，最稳）、
+> `*-arm64-slim.apk`（R8 精简包，**4.07 MB**，体积小但需要真机回归一遍）、
+> `*-debug.apk`（调试包，37 MB，日志最全）。
+
+### 方式二：自己构建
+
+```bash
+git clone <this-repo> && cd opencode-pocket
+
+# 1) 拉取内置的 proot 运行时（Termux 官方包，约 400KB）
+node tools/fetch-boot-runtime.mjs
+
+# 2) 单元测试 + 构建
+./gradlew :app:testDebugUnitTest    # 41 个纯逻辑用例（解析 / 配置 / 版本 / Markdown / 格式化）
+./gradlew :app:assembleDebug        # 产物：app/build/outputs/apk/debug/app-debug.apk
+./gradlew :app:assembleRelease      # 默认用 debug 签名，可直接安装
+
+# 可选：R8 精简包（4 MB 左右；会重写代码，务必真机回归）
+./gradlew :app:assembleRelease "-Ppocket.minify=true"
+```
+
+环境要求：JDK 21+、Android SDK（platform 37 + build-tools 36.0.0）、Node 20+（只用来跑取件脚本）。
+也可以直接用仓库里的 GitHub Actions 工作流：推送到 `main` 或手动 `Run workflow`，产物在 Artifacts 里。
+
+构建完成后可以跑一次打包自检（校验内置 ELF 没被改写、ABI 只有 arm64、容器脚本齐全）：
+
+```bash
+node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
+# [verify-apk] 通过：4 个原生库字节一致，4 个脚本齐全，ABI=arm64-v8a
+```
+
+> 国内网络提示：Gradle 官方分发地址可能连不上，把 `gradle/wrapper/gradle-wrapper.properties`
+> 里的 `distributionUrl` 换成 `https://mirrors.cloud.tencent.com/gradle/gradle-9.5.0-bin.zip`
+> 即可（记得同步 `distributionSha256Sum`，或直接删掉这一行）。
+
+---
+
+## 首次使用
+
+1. **安装环境**（安装页）
+   - 建议先点「全线测速」挑最快的镜像；
+   - 点「一键安装」，保持 App 在前台；
+   - 下载 rootfs（约 30 MB）与 OpenCode 本体（约 90 MB）都支持断点续传，中断了再点一次即可。
+2. **配置模型**（设置 → 模型与密钥）
+   - 填任意一个 provider 的 API Key（DeepSeek / Anthropic / OpenAI / OpenRouter / 通义 / 智谱 / 硅基流动…）；
+   - 想指定默认模型就填 `provider/model`，例如 `deepseek/deepseek-chat`；
+   - 点「保存并重启服务」生效。
+3. **开聊**（对话页）或 **开网页**（首页 → 打开网页）。
+4. **工作区**：默认把 `/sdcard/OpenCode` 挂进容器。第一次用建议在首页点「去授权」给「所有文件访问权限」，
+   或者直接改成内部工作区（设置 → 工作区）。
+
+---
+
+## 技术方案
+
+```
+┌─────────────────────────── Android App（Kotlin + Compose） ───────────────────────────┐
+│  首页 / 对话 / 终端 / 设置            原生客户端：OkHttp + SSE ←→ 127.0.0.1:4096      │
+│  ServerService（前台服务，通知栏状态 + 停止动作，Partial WakeLock）                    │
+│  Installer（分步流水线）  Repos（测速/发现版本）  Downloader（续传/多源）  TarExtract    │
+└───────────────┬───────────────────────────────────────────────────────────────────────┘
+                │ ProcessBuilder（LD_LIBRARY_PATH / PROOT_LOADER / PROOT_TMP_DIR）
+        ┌───────▼────────┐        nativeLibraryDir（唯一可执行目录）
+        │  proot + loader │◄────── libproot.so / libprootloader.so（APK 内置）
+        └───────┬────────┘
+                │ fake root(-0) + bind(/dev /proc /sys /system /apex /sdcard ↔ /root/workspace)
+     ┌──────────▼──────────┐
+     │ files/linux/ubuntu  │  Ubuntu 24.04 arm64（rootfs 由镜像下载解压）
+     │  /usr/local/bin/opencode  ← 官方 opencode-linux-arm64（npm 镜像 tarball 直取）
+     └──────────┬──────────┘
+                │ opencode web --hostname 127.0.0.1 --port 4096
+     ┌──────────▼──────────┐
+     │ HTTP API + Web UI   │  原生对话页与 WebView 共用同一端口
+     └─────────────────────┘
+```
+
+几个关键点（也是踩过的坑）：
+
+- **Android 10+ 的 W^X**：应用私有目录不能执行代码。所以 proot 与 loader 必须以 `lib*.so` 的形式放在
+  `jniLibs`，由系统解压到 `nativeLibraryDir` 再执行；guest 程序则交给 proot 的 `PROOT_LOADER`
+  做 userland exec，不经过内核的 execve 检查。
+- **SONAME 对不上**：`libtalloc.so.2` 没法直接进 APK（AGP 只收 `*.so`）。运行前把
+  `libtalloc.so` → `files/linux/lib/libtalloc.so.2`、`libandroidshmem.so` → `libandroid-shmem.so`
+  复制一份给动态链接器。
+- **DNS**：Android 没有 `/etc/resolv.conf`，每次安装/启动前从 `ConnectivityManager` 读 DNS 写进 rootfs。
+- **硬链接**：app 私有目录（f2fs/ext4）支持硬链接，`--link2symlink` 只在探测失败时才启用。
+- **apt 在 proot 里**：`APT::Sandbox::User=root`，否则 apt 会尝试切换到 `_apt` 用户而失败；
+  源统一改写成经典 `sources.list`（去掉 deb822 的那份，避免双份源互相打架）。
+- **不给系统添乱**：`--kill-on-exit` 保证 proot 一死带走整棵进程树；停止时再补一次
+  `pkill -9 -f opencode` 兜底。
+- **设备 Shell 桥**：Android 10+ 的普通应用既没有 shell 身份也不能执行系统命令，所以走 Shizuku 的
+  「用户服务」：把 `IDeviceShellService.aidl` 编译出的实现类交给 Shizuku，在它的 shell/root 进程里跑，
+  App 只通过 Binder 调用；容器里则由 `dexec`（curl + 随机 token）打到 `127.0.0.1:3090` 的本地 HTTP 桥。
+
+---
+
+## 已验证 / 只能在真机验证的部分
+
+开发机上已经实际构建并通过以下检查（Windows + JDK 25 + Gradle 9.5 + AGP 9.3.3）：
+
+- **41 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
+  `opencode.json` 生成、环境变量映射、版本比较（含 `24.04.10 > 24.04.9` 这种坑）、
+  Markdown 解析、格式化输出；
+- `assembleDebug` / `assembleRelease` 均通过：**37 MB / 27.9 MB**；R8 精简版 **4.07 MB**；
+- 打包自检（`tools/verify-apk.mjs`）：4 个内置 ELF 与 `jniLibs` **逐字节一致**（proot 的入口点没有被
+  strip 改写）、只含 `arm64-v8a`、容器脚本齐全、合并后 manifest 为 `extractNativeLibs=true`、
+  前台服务类型为 `specialUse`、`DeviceShellUserService` / `ShizukuProvider` 都在、release 包签名为可直装的 debug key；
+- 内置运行时全部来自 Termux 官方仓库（proot 5.1.107.96 / libtalloc 2.5.0 / libandroid-shmem 0.7），
+  `tools/fetch-boot-runtime.mjs` 会校验 sha256 并写入 `jniLibs/boot-runtime.json`。
+
+必须拿到真机才能验证的部分（CI 覆盖不到）：
+
+- 容器能否正常起来、apt 是否能装包、以及最关键的：opencode 的 Bun 二进制在 proot 下能否正常跑；
+- Shizuku 用户服务（`dexec`）的绑定与执行；
+- 各家 ROM 的省电策略与 Android 12+ 幻影进程限制；
+- R8 精简包的功能回归（所以默认发布的还是未混淆版本）。
+
+任何一步失败时：安装页会显示该步的错误与可重试按钮，「终端 → 安装日志 / 运行日志」有完整输出。
+
+## 常见问题
+
+**服务启动超时 / 一启动就退出？**
+看「终端 → 运行日志」。最常见的原因是没配 API Key（opencode 起得来但用不了），其次是内存不足。
+可以在设置里打开「低内存模式」，它会关掉文件监视与 LSP 自动下载。
+
+**Android 12+ 上服务偶尔被杀？**
+那是系统的「幻影进程杀手」（限制每个应用的后台进程数）。把 App 加入电池白名单（首页会提示），
+或者用 adb / Shizuku 执行：
+
+```bash
+adb shell settings put global settings_enable_monitor_phantom_procs false
+```
+
+**能装到 x86 模拟器上吗？**
+不能。内置 proot 与 rootfs 都是 aarch64，`ndk.abiFilters` 也只保留 `arm64-v8a`。
+
+**opencode 需要 Node 吗？**
+不需要，opencode 本体是 Bun 编译出的单文件可执行程序。Node.js（安装第 4 步）是可选项，
+留给插件、npm 项目和想在手机里跑 node 的场景。
+
+**设备 Shell（`dexec`）怎么用？**
+1. 装并启动 [Shizuku](https://shizuku.rikka.app/)（Android 11+ 可用无线调试在本机启动，不需要电脑）；
+2. App →「设置 → 设备 Shell」打开开关，点「请求 Shizuku 授权」并允许；
+3. 容器里就能用了：
+
+```bash
+dexec 'getprop ro.product.model'    # 设备型号
+dexec 'dumpsys battery | head -20'  # 电池
+dexec 'pm list packages | grep 星'  # 找应用
+```
+
+同一时间 App 会往容器写 `~/.config/opencode/skills/device-shell/SKILL.md`，
+于是 opencode 的 agent 自己也会知道什么时候该用 `dexec`（技能按需加载）。
+桥只监听 `127.0.0.1:3090`，每次开启会重新生成随机 token，关掉开关即失效。
+
+**工作区里的中文文件名 / 大仓库？**
+容器里的 git 已配置 `core.fileMode=false`、`safe.directory=*`。大仓库建议关掉快照（设置里可关），
+否则 opencode 的内部 git 快照会占不少空间。
+
+**想改成官方 Web UI 之外的原生体验？**
+「对话」页就是原生实现：`GET /event` 的 SSE 事件流 + `prompt_async`，没有中间层，可自行扩展。
+
+---
+
+## 目录结构
+
+```
+app/src/main/java/dev/pocket/opencode/
+├── core/            容器与安装：PocketPaths Proot GuestShell Installer Repos Downloader
+│                    TarExtract ServerController NetworkBridge OpencodeConfig SettingsStore
+│                    Doctor（一键体检） Versions
+│                    ShizukuBridge + DeviceShellManager（设备 Shell 桥）
+├── data/            服务端类型与 REST/SSE 客户端
+├── service/         前台服务与通知 + DeviceShellServer（本地 HTTP 桥）+ DeviceShellUserService（Shizuku 侧）
+├── ui/              Compose 界面：Home / Setup / Chat / Terminal / Web / Settings / Doctor + 自绘图标
+└── util/
+
+app/src/main/aidl/            Shizuku 用户服务的 Binder 接口
+app/src/main/assets/scripts/  容器内执行的 shell 脚本（apt、工具、收尾）
+app/src/main/assets/device-shell/  dexec 命令与 device-shell 技能模板
+app/src/test/                 41 个 JVM 单元测试（解析 / 配置 / 版本 / Markdown / 格式化）
+tools/fetch-boot-runtime.mjs  拉取 Termux 官方 proot 运行时并校验，落到 jniLibs
+tools/verify-apk.mjs          打包自检：内置 ELF 是否被改、ABI、容器脚本
+```
+
+## 第三方组件与许可
+
+- [opencode](https://github.com/anomalyco/opencode)（MIT）：运行时下载，非随包分发。
+- Termux `proot` / `libtalloc` / `libandroid-shmem`（GPL-2.0 / LGPL-3.0 / MIT 等，随包分发，
+  由 `tools/fetch-boot-runtime.mjs` 从 Termux 官方仓库拉取并记录 sha256）。
+- Ubuntu base rootfs：首次运行时下载，遵循 Ubuntu 各自许可。
+- AndroidX、OkHttp、commons-compress、xz：见各自许可证。
+
+本项目自身：MIT。

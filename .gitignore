@@ -1,0 +1,20 @@
+# 构建产物
+build/
+*/build/
+.gradle/
+local.properties
+.kotlin/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 运行时工具缓存（tools/fetch-boot-runtime.mjs 会重新下载）
+tools/cache/
+
+# 签名
+*.keystore
+*.jks
+key.properties
+dist/

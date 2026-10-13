@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 终端提示符：> -->
+    <path
+        android:pathData="M34,38 L53,54 L34,70"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="9"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <!-- 光标：_ -->
+    <path
+        android:pathData="M62,70 L80,70"
+        android:strokeColor="#FF22D3EE"
+        android:strokeWidth="9"
+        android:strokeLineCap="round" />
+    <!-- 右上角的小圆点，呼应“口袋里的进程灯” -->
+    <path
+        android:pathData="M74,36 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0"
+        android:fillColor="#FF22D3EE"
+        android:fillAlpha="0.85" />
+</vector>

@@ -1,0 +1,46 @@
+{
+  "generatedAt": "2026-10-13T12:42:18.311Z",
+  "source": "https://packages.termux.dev/apt/termux-main",
+  "packages": [
+    {
+      "name": "proot",
+      "version": "5.1.107.96",
+      "file": "C:\\Users\\qin\\Desktop\\opencode-pocket\\tools\\cache\\termux\\proot_5.1.107.96_aarch64.deb",
+      "sha256": "8199dca06dccb693ec09fb1759e3e1ad08b4863f0c11c612f89c20bd9ecdc1a0"
+    },
+    {
+      "name": "libtalloc",
+      "version": "2.5.0",
+      "file": "C:\\Users\\qin\\Desktop\\opencode-pocket\\tools\\cache\\termux\\libtalloc_2.5.0_aarch64.deb",
+      "sha256": "556591f43bb773ad8777e1a29522640866a55f95dab71914418b94a8c58ad5a7"
+    },
+    {
+      "name": "libandroid-shmem",
+      "version": "0.7",
+      "file": "C:\\Users\\qin\\Desktop\\opencode-pocket\\tools\\cache\\termux\\libandroid-shmem_0.7_aarch64.deb",
+      "sha256": "0da3a24d558b93c92bcf8d611e0826a99ff96e396b148e6cdf33b47c47c57ff6"
+    }
+  ],
+  "files": [
+    {
+      "target": "libproot.so",
+      "size": 247488,
+      "sha256": "1545b85b312505db6eb6908ff8b2ded0a77a3bd689c50ae85aa7c1d8445dd717"
+    },
+    {
+      "target": "libprootloader.so",
+      "size": 18136,
+      "sha256": "cbdef0e652c2b78af25d867e1719fdebbb0915e25aae2dd35b3b5c1835f6b551"
+    },
+    {
+      "target": "libtalloc.so",
+      "size": 33592,
+      "sha256": "742b438c4d09e276985a61d44164c9de207b6d8cc268f3018cb3001961bcb309"
+    },
+    {
+      "target": "libandroidshmem.so",
+      "size": 14432,
+      "sha256": "84475798e07c8174dbbfaec70a827fdb02f19ffa69a589380c13e7507fd0e731"
+    }
+  ]
+}
