@@ -3,6 +3,7 @@ name: Build APK
 on:
   push:
     branches: ["main"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -13,12 +14,25 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: 确保 gradlew 可执行（Windows 上提交容易丢掉执行位）
         run: chmod +x gradlew
+
+      - name: 读取版本号（来自 app/build.gradle.kts）
+        id: version
+        run: |
+          VERSION=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts | head -n1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::没能从 app/build.gradle.kts 里读到 versionName"
+            exit 1
+          fi
+          echo "版本号: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: 安装 JDK 21
         uses: actions/setup-java@v4
@@ -55,28 +69,93 @@ jobs:
       - name: 校验内置运行时与远端一致
         run: node tools/fetch-boot-runtime.mjs --check
 
-      - name: 单元测试（解析 / 配置 / 版本 / Markdown）
+      - name: 单元测试（解析 / 配置 / 版本 / 上游文件 / Markdown）
         run: ./gradlew :app:testDebugUnitTest --console=plain --no-daemon
 
       - name: 构建 Debug APK
         run: ./gradlew :app:assembleDebug --console=plain --no-daemon
 
+      - name: 暂存 Debug 包
+        run: |
+          mkdir -p artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "artifacts/opencode-pocket-${{ steps.version.outputs.version }}-debug.apk"
+
       - name: 构建 Release APK（默认 debug 签名，便于直接安装体验）
         run: ./gradlew :app:assembleRelease --console=plain --no-daemon
+
+      - name: 暂存标准包
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk \
+             "artifacts/opencode-pocket-${{ steps.version.outputs.version }}-arm64.apk"
 
       - name: 构建精简版 Release APK（R8 压缩，约 4 MB）
         run: ./gradlew :app:assembleRelease "-Ppocket.minify=true" --console=plain --no-daemon
 
-      - name: 打包自检（内置运行时字节一致 / ABI / 容器脚本）
+      - name: 暂存精简包
         run: |
-          node tools/verify-apk.mjs app/build/outputs/apk/debug/app-debug.apk
-          node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
+          cp app/build/outputs/apk/release/app-release.apk \
+             "artifacts/opencode-pocket-${{ steps.version.outputs.version }}-arm64-slim.apk"
+          ls -l artifacts
+
+      - name: 打包自检（原生库字节一致 / ABI / 容器脚本 / manifest / dex）
+        run: |
+          for apk in artifacts/*.apk; do
+            node tools/verify-apk.mjs "$apk"
+          done
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: opencode-pocket-apk
-          path: |
-            app/build/outputs/apk/debug/*.apk
-            app/build/outputs/apk/release/*.apk
+          path: artifacts/*.apk
           if-no-files-found: error
+
+  release:
+    needs: build
+    # 只在推送 v* 标签时发布，且必须先构建成功
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 校验 tag 与 app/build.gradle.kts 的 versionName 一致
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "tag=$TAG  versionName=$VERSION"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::标签 v$TAG 与 versionName $VERSION 不一致：请先把 app/build.gradle.kts 的 versionCode/versionName 改好再打标签"
+            exit 1
+          fi
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: opencode-pocket-apk
+          path: artifacts
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.apk
+          generate_release_notes: true
+          body: |
+            ## 安装
+
+            手机需要 **arm64**、Android **11（API 30）及以上**。下载对应 APK 直接安装（需允许"未知来源"）。
+
+            | 文件 | 大小 | 说明 |
+            | --- | --- | --- |
+            | `*-arm64.apk` | 约 28 MB | **推荐**，未混淆，最稳 |
+            | `*-arm64-slim.apk` | 约 4 MB | R8 精简版，体积小，建议真机回归一次 |
+            | `*-debug.apk` | 约 37 MB | 调试版，堆栈最全 |
+
+            ## 首次使用
+
+            1. 打开 App → 安装页点「一键安装」（保持前台，约 5 分钟）
+            2. 设置 → 模型与密钥，填一个 API Key，点「保存并重启服务」
+            3. 首页「启动服务」→ 开「对话」或「打开网页」
+
+            更多说明见 [README](https://github.com/${{ github.repository }}#readme)。

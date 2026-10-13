@@ -67,6 +67,12 @@ node tools/fetch-boot-runtime.mjs
 ./gradlew :app:assembleRelease "-Ppocket.minify=true"
 ```
 
+**发布新版本**：改 `app/build.gradle.kts` 里的 `versionCode` / `versionName`，然后推一个同名标签即可自动构建并发布 Release（CI 会先校验 tag 与 versionName 一致）：
+
+```bash
+git tag v1.1.2 && git push origin v1.1.2
+```
+
 环境要求：JDK 21+、Android SDK（platform 37 + build-tools 36.0.0）、Node 20+（只用来跑取件脚本）。
 也可以直接用仓库里的 GitHub Actions 工作流：推送到 `main` 或手动 `Run workflow`，产物在 Artifacts 里。
 
