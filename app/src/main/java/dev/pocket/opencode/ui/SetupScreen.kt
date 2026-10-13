@@ -68,6 +68,8 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
 
     val logs = remember { mutableStateListOf<String>() }
     LaunchedEffect(Unit) {
+        // 先灌一遍历史（SharedFlow 没有 replay），再消费实时日志
+        logs.addAll(engine.installer.recentLogs.value.takeLast(400))
         engine.installer.logs.collect { line ->
             logs.add(line)
             if (logs.size > 600) logs.removeAt(0)
