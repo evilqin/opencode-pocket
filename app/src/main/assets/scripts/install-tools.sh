@@ -6,6 +6,16 @@ export DEBIAN_FRONTEND=noninteractive
 # 上一次被中断（取消/断电/超时）时的自救：dpkg 会留下“未配置”状态，
 # 不修就会一直卡在 "E: dpkg was interrupted"。
 mkdir -p /var/lib/dpkg/updates /var/lib/dpkg/info /var/cache/apt/archives/partial
+
+# https 的 apt 源必须有 CA 证书，否则会以 "No system certificates available" 全量失败，
+# 而那时 apt-get update 仍然返回 0（只有 W: 警告），后面 install 才报 "Unable to locate package"。
+# 这里把它变成一句能看懂的话，并告诉用户该重跑哪一步。
+if grep -q '^deb https://' /etc/apt/sources.list 2>/dev/null && [ ! -s /etc/ssl/certs/ca-certificates.crt ]; then
+    echo "缺少 CA 证书（/etc/ssl/certs/ca-certificates.crt 为空）：https 的 apt 源无法校验。" >&2
+    echo "请在 App 里重跑「安装 Ubuntu 环境」这一步（它会从系统证书库注入 CA），再重试本步骤。" >&2
+    exit 1
+fi
+
 if [ -f /var/lib/dpkg/updates/0000 ] || dpkg --audit 2>/dev/null | grep -q .; then
     echo "检测到 dpkg 处于中断状态，先修复…"
     dpkg --configure -a || true

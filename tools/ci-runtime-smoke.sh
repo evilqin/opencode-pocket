@@ -118,6 +118,27 @@ run 'echo "$LANG" | grep -q C.UTF-8 && echo locale-ok'
 
 # ---------------------------------------------------------------- apt / dpkg（真机高风险环节）
 
+log "注入系统 CA 证书（与 App 的 installSystemCaBundle 等价：每张证书一个 PEM，拼成一个 bundle）"
+# Ubuntu base 里没有 ca-certificates，apt 走 https 源就会 "No system certificates available"。
+# App 是从 Android 的 /system/etc/security/cacerts 拼；这里用 runner 的 Mozilla 证书（同一套逻辑）。
+if [ ! -s "$ROOTFS/etc/ssl/certs/ca-certificates.crt" ]; then
+  mkdir -p "$ROOTFS/etc/ssl/certs"
+  : > "$ROOTFS/etc/ssl/certs/ca-certificates.crt"
+  CA_COUNT=0
+  for src in /usr/share/ca-certificates/mozilla/*.crt; do
+    [ -f "$src" ] || continue
+    cat "$src" >> "$ROOTFS/etc/ssl/certs/ca-certificates.crt"
+    printf '\n' >> "$ROOTFS/etc/ssl/certs/ca-certificates.crt"
+    CA_COUNT=$((CA_COUNT + 1))
+  done
+  [ "$CA_COUNT" -gt 0 ] || fail "runner 上没有可用的 CA 源目录"
+  log "写入 $CA_COUNT 张 CA（$(du -h "$ROOTFS/etc/ssl/certs/ca-certificates.crt" | cut -f1)）"
+  # 顺带验证：容器里能用这套证书访问 https（App 的做法是否真的够）
+  run 'openssl version 2>/dev/null || echo "（容器里还没有 openssl，跳过单测）"'
+else
+  log "rootfs 里已有 CA bundle，跳过"
+fi
+
 log "配置 apt 源：用仓库里的 setup-apt.sh（与安装流水线同一份，占位符替换方式一致）"
 CODENAME=$(run '. /etc/os-release && echo "$VERSION_CODENAME"' | tail -n1)
 [ -n "$CODENAME" ] || fail "拿不到发行版代号"

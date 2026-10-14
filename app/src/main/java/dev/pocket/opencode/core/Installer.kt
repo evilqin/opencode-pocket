@@ -364,12 +364,12 @@ class Installer(
         val apt = Mirrors.find(Mirrors.apt, config.aptMirror)
         net.writeResolvConf()
         installSystemCaBundle()
-        // apt 必须走 HTTPS 且校验包签名：没有 CA 就明确失败，别静默降级成明文源
-        val hasCa = File(paths.rootfs, "etc/ssl/certs/ca-certificates.crt").let { it.isFile && it.length() > 8 * 1024 }
-        if (!hasCa) {
+        // apt 源是 HTTPS：没有 CA 就没有证书校验，明确失败，绝不悄悄退回明文源
+        val ca = File(paths.rootfs, CaBundle.GUEST_PATH)
+        if (CaBundle.needsInjection(ca.isFile, if (ca.isFile) ca.length() else 0)) {
             throw IllegalStateException(
-                "容器里没有 CA 证书，无法安全地安装软件包。" +
-                    "请确认设备系统证书可读（正常机型都有），或换一个支持 HTTPS 的镜像源后重试。",
+                "容器里没有可用的 CA 证书，无法安全地安装软件包：" +
+                    "请确认设备系统证书可读（注入失败会打日志），或换一个支持 HTTPS 的镜像源后重试。",
             )
         }
         if (apt.base.startsWith("http://")) {
@@ -390,7 +390,15 @@ class Installer(
             timeoutMs = 600_000,
             isCanceled = { cancelRequested },
         ) { line -> log("apt: $line") }
-        if (!update.success) throw IllegalStateException("apt update 失败：${update.text.takeLast(400)}")
+        if (!update.success) {
+            val text = update.text
+            val hint = if (text.contains("No system certificates", ignoreCase = true) || text.contains("Certificate verification failed", ignoreCase = true)) {
+                "（容器里的 CA 证书不可用：重跑第 2 步「安装 Ubuntu 环境」会重新注入系统证书）"
+            } else {
+                ""
+            }
+            throw IllegalStateException("apt update 失败$hint：${text.takeLast(400)}")
+        }
 
         setProgress(0.5f, "安装基础工具…")
         val install = shell.run(
@@ -400,12 +408,15 @@ class Installer(
             isCanceled = { cancelRequested },
         ) { line -> log("apt: $line") }
         if (!install.success) {
-            val hint = if (install.text.contains("dpkg was interrupted", ignoreCase = true)) {
-                "（dpkg 中断过，重跑本步骤会自动修复）"
-            } else {
-                ""
+            val text = install.text
+            val hint = when {
+                text.contains("dpkg was interrupted", ignoreCase = true) ->
+                    "（dpkg 中断过，重跑本步骤会自动修复）"
+                text.contains("CA 证书") || text.contains("No system certificates", ignoreCase = true) ->
+                    "（容器里缺少 CA 证书：先重跑第 2 步「安装 Ubuntu 环境」注入系统证书，再回来重试）"
+                else -> ""
             }
-            throw IllegalStateException("工具安装失败$hint：${install.text.takeLast(400)}")
+            throw IllegalStateException("工具安装失败$hint：${text.takeLast(400)}")
         }
         saveVersion("tools", "ready")
         return "git / curl / ripgrep 已就绪"
@@ -732,8 +743,8 @@ class Installer(
         ).filter { it.isDirectory }
         if (sources.isEmpty()) return
 
-        val target = File(paths.rootfs, "etc/ssl/certs/ca-certificates.crt")
-        if (target.isFile && target.length() > 8 * 1024) return
+        val target = File(paths.rootfs, CaBundle.GUEST_PATH)
+        if (!CaBundle.needsInjection(target.isFile, if (target.isFile) target.length() else 0)) return
         target.parentFile?.mkdirs()
 
         var count = 0
