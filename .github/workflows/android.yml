@@ -159,7 +159,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: 运行容器配方冒烟测试
-        run: bash tools/ci-runtime-smoke.sh
+        run: timeout 2400 bash tools/ci-runtime-smoke.sh
 
       - name: 冒烟失败时打印关键日志
         if: failure()

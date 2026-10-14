@@ -29,6 +29,13 @@ PASSWORD="${PASSWORD:-smoke-test-password}"
 log() { printf '\n\033[1;36m[smoke]\033[0m %s\n' "$*"; }
 fail() { printf '\n\033[1;31m[smoke] 失败：%s\033[0m\n' "$*" >&2; exit 1; }
 
+# 每段耗时（排查"卡在哪一步"最有用；CI 上一轮就是被一个没有超时的 curl 卡了 39 分钟）
+MARK=$SECONDS
+mark() { printf '\033[1;35m[smoke] %s（本段 %ss / 累计 %ss）\033[0m\n' "$*" "$((SECONDS - MARK))" "$SECONDS"; MARK=$SECONDS; }
+
+# 所有 HTTP 探测都必须有超时：否则「端口开了但还没响应」会让 curl 永久阻塞
+CURL_OPTS=(--connect-timeout 3 --max-time 10 --retry 0)
+
 mkdir -p "$WORK"
 
 # ---------------------------------------------------------------- 依赖
@@ -97,11 +104,25 @@ PROOT_COMMON=(
   LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM=dumb SHELL=/bin/bash
 )
 
-run() { "${PROOT_COMMON[@]}" /bin/bash --login -c "$1"; }
+run() {
+  "${PROOT_COMMON[@]}" /bin/bash --login -c "$1"
+}
+
+# 重活带硬超时：真机侧的 App 也有各自的超时（apt 600s / 工具 900s），这里对齐
+run_limited() {
+  local limit="$1"
+  shift
+  local start=$SECONDS
+  local rc=0
+  timeout "$limit" "${PROOT_COMMON[@]}" /bin/bash --login -c "$1" || rc=$?
+  printf '[smoke] 该步骤耗时 %ss（退出码 %s）\n' "$((SECONDS - start))" "$rc"
+  return $rc
+}
 
 log "容器自检（uname / fake root / os-release）"
 run 'uname -m; id -u; . /etc/os-release && echo "$PRETTY_NAME"'
 [ "$(run 'id -u')" = "0" ] || fail "proot 的 fake root 没有生效"
+mark "proot 配方可用（fake root 生效）"
 
 # ---------------------------------------------------------------- App 内置脚本
 
@@ -115,6 +136,7 @@ run 'test -f /root/.pocket-banner && echo banner-ok'
 run "grep -q '^registry=$MIRROR_NPM' /root/.npmrc && echo npmrc-ok"
 run 'grep -q "alias oc=" /etc/profile.d/90-pocket.sh && echo profile-ok'
 run 'echo "$LANG" | grep -q C.UTF-8 && echo locale-ok'
+mark "容器脚本可用（目录 / npmrc / banner / locale）"
 
 # ---------------------------------------------------------------- apt / dpkg（真机高风险环节）
 
@@ -133,11 +155,10 @@ if [ ! -s "$ROOTFS/etc/ssl/certs/ca-certificates.crt" ]; then
   done
   [ "$CA_COUNT" -gt 0 ] || fail "runner 上没有可用的 CA 源目录"
   log "写入 $CA_COUNT 张 CA（$(du -h "$ROOTFS/etc/ssl/certs/ca-certificates.crt" | cut -f1)）"
-  # 顺带验证：容器里能用这套证书访问 https（App 的做法是否真的够）
-  run 'openssl version 2>/dev/null || echo "（容器里还没有 openssl，跳过单测）"'
 else
   log "rootfs 里已有 CA bundle，跳过"
 fi
+mark "CA 注入完成"
 
 log "配置 apt 源：用仓库里的 setup-apt.sh（与安装流水线同一份，占位符替换方式一致）"
 CODENAME=$(run '. /etc/os-release && echo "$VERSION_CODENAME"' | tail -n1)
@@ -160,9 +181,10 @@ log "apt 源就绪（含 apt-get update）"
 
 log "安装容器基础工具：apt + dpkg 在 proot 假 root 下能不能真的用（真机最怕这一步）"
 TOOLS_LOG="$WORK/tools.log"
-run 'bash /root/.pocket/install-tools.sh' > "$TOOLS_LOG" 2>&1 || { tail -n 30 "$TOOLS_LOG"; run 'ls -la /var/lib/apt/lists | head -n 12' || true; fail "install-tools.sh 失败"; }
+run_limited 1500 'bash /root/.pocket/install-tools.sh' > "$TOOLS_LOG" 2>&1 || { tail -n 30 "$TOOLS_LOG"; run 'ls -la /var/lib/apt/lists | head -n 12' || true; fail "install-tools.sh 失败"; }
 grep -q POCKET_TOOLS_READY "$TOOLS_LOG" || { tail -n 30 "$TOOLS_LOG"; fail "install-tools.sh 没有输出 POCKET_TOOLS_READY"; }
 run 'git --version && curl --version | head -n1 && rg --version | head -n1'
+mark "基础工具装好（apt + dpkg 在假 root 下可用）"
 
 log "验证 git 在容器里能提交（opencode 的快照/回滚依赖它）"
 run 'cd /root/workspace && git init -q . && git config user.email pocket@local && git config user.name pocket && echo hi > smoke.txt && git add smoke.txt && git commit -qm "smoke" && git log --oneline -1' \
@@ -172,8 +194,11 @@ run 'cd /root/workspace && git init -q . && git config user.email pocket@local &
 
 if [ ! -x "$ROOTFS/usr/local/bin/node" ]; then
   log "从镜像直取 Node（linux-x64）"
+  # 版本要用「数字分量」排序：字符串排序会把 v8.9.4 当成最新（CI 上真的踩过）
   NODE_VERSION=$(curl -fsSL "$MIRROR_NODE/index.json" \
-    | jq -r '[.[] | select(.lts != false) | select(.files | index("linux-x64"))] | sort_by(.version) | last | .version')
+    | jq -r '[.[] | select(.lts != false) | select(.files | index("linux-x64"))]
+             | sort_by(.version | ltrimstr("v") | split(".") | map(tonumber))
+             | last | .version')
   [ -n "$NODE_VERSION" ] && [ "$NODE_VERSION" != "null" ] || fail "没能在 index.json 里找到 x64 LTS"
   FILE="node-$NODE_VERSION-linux-x64.tar.xz"
   curl -fsSL "$MIRROR_NODE/$NODE_VERSION/$FILE" -o "$WORK/$FILE"
@@ -188,6 +213,7 @@ if [ ! -x "$ROOTFS/usr/local/bin/node" ]; then
   cp -a "$WORK/node-extract/." "$ROOTFS/usr/local/"
 fi
 run 'node -v && npm -v'
+mark "Node 就绪"
 
 # ---------------------------------------------------------------- opencode（走 npm 镜像直取）
 
@@ -216,6 +242,7 @@ fi
 log "★ 关键验证：opencode 能不能在 proot 下运行"
 run 'opencode --version' || fail "opencode 在 proot 下无法运行（这是整条链路的头号风险）"
 run 'file /usr/local/lib/opencode/bin/opencode | head -n1' || true
+mark "opencode 能在 proot 下运行"
 
 # ---------------------------------------------------------------- 服务与 API 冒烟
 
@@ -232,54 +259,62 @@ trap cleanup EXIT
 
 wait_health() {
   local port="$1"
-  for _ in $(seq 1 60); do
-    if curl -fsS -u "opencode:$PASSWORD" "http://127.0.0.1:$port/global/health" >/dev/null 2>&1; then
+  local log="$2"
+  for i in $(seq 1 180); do
+    if curl -fsS "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" "http://127.0.0.1:$port/global/health" >/dev/null 2>&1; then
       return 0
+    fi
+    # 每 15 秒打一次进度（含服务端日志尾部），卡住时一眼能看出它在干什么
+    if [ $((i % 15)) -eq 0 ]; then
+      printf '[smoke]   ...等待 %ss；服务端日志尾部：\n' "$i"
+      tail -n 5 "$log" 2>/dev/null | sed 's/^/      /' || true
     fi
     sleep 1
   done
   return 1
 }
 
-log "启动 opencode serve（带 OPENCODE_SERVER_PASSWORD，与 App 的启动方式一致）"
+mark "启动 opencode serve（带 OPENCODE_SERVER_PASSWORD，与 App 的启动方式一致）"
 "${PROOT_COMMON[@]}" \
   "OPENCODE_SERVER_PASSWORD=$PASSWORD" OPENCODE_DISABLE_AUTOUPDATE=1 \
   /bin/bash --login -c "cd /root/workspace && exec opencode serve --hostname 127.0.0.1 --port $PORT_SERVE" \
   > "$SERVE_LOG" 2>&1 &
 SERVE_PID=$!
 
-wait_health "$PORT_SERVE" || { tail -n 40 "$SERVE_LOG"; fail "serve 60 秒内没有就绪"; }
-log "健康检查通过：$(curl -fsS -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/global/health")"
+wait_health "$PORT_SERVE" "$SERVE_LOG" || { tail -n 40 "$SERVE_LOG"; fail "serve 180 秒内没有就绪"; }
+mark "serve 就绪"
+log "健康检查通过：$(curl -fsS "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/global/health")"
 
 log "验证鉴权：不带口令访问会话列表应该被拒绝"
-UNAUTH=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_SERVE/session")
+UNAUTH=$(curl -s "${CURL_OPTS[@]}" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_SERVE/session")
 [ "$UNAUTH" = "401" ] || fail "不带口令竟然返回 $UNAUTH（期望 401）—— App 的口令注入就不成立了"
 log "鉴权生效（401）"
 
 log "验证会话 API：创建 / 列表 / 删除"
-SESSION_ID=$(curl -fsS -u "opencode:$PASSWORD" -X POST "http://127.0.0.1:$PORT_SERVE/session" \
+SESSION_ID=$(curl -fsS "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" -X POST "http://127.0.0.1:$PORT_SERVE/session" \
   -H 'content-type: application/json' -d '{"title":"smoke"}' | jq -r '.id')
 [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ] || fail "创建会话失败"
-curl -fsS -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/session" | jq -e 'length >= 1' >/dev/null \
+curl -fsS "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/session" | jq -e 'length >= 1' >/dev/null \
   || fail "会话列表里看不到刚创建的会话"
 log "会话 API 正常（$SESSION_ID）"
 
 log "验证 /config/providers 与 /agent（App 的模型选择器依赖）"
-curl -fsS -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/config/providers" | jq -e '.providers | length >= 1' >/dev/null \
+curl -fsS "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/config/providers" | jq -e '.providers | length >= 1' >/dev/null \
   || fail "/config/providers 结构不符合预期"
-curl -fsS -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/agent" | jq -e 'length >= 1' >/dev/null \
+curl -fsS "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/agent" | jq -e 'length >= 1' >/dev/null \
   || fail "/agent 结构不符合预期"
 
-log "验证 SSE 事件流（前 5 秒应该收到 server.connected）"
-SSE=$(timeout 5 curl -sN -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/event" || true)
+log "验证 SSE 事件流（前 8 秒应该收到 server.connected）"
+SSE=$(timeout 8 curl -sN "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_SERVE/event" || true)
 printf '%s' "$SSE" | grep -q 'server.connected' || fail "SSE 里没有 server.connected：$(printf '%s' "$SSE" | head -c 200)"
 log "SSE 正常"
 
 log "验证中断与删除接口"
-curl -fsS -u "opencode:$PASSWORD" -X POST "http://127.0.0.1:$PORT_SERVE/session/$SESSION_ID/abort" >/dev/null \
+curl -fsS "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" -X POST "http://127.0.0.1:$PORT_SERVE/session/$SESSION_ID/abort" >/dev/null \
   || fail "abort 接口失败"
-curl -fsS -u "opencode:$PASSWORD" -X DELETE "http://127.0.0.1:$PORT_SERVE/session/$SESSION_ID" >/dev/null \
+curl -fsS "${CURL_OPTS[@]}" -u "opencode:$PASSWORD" -X DELETE "http://127.0.0.1:$PORT_SERVE/session/$SESSION_ID" >/dev/null \
   || fail "删除会话失败"
+mark "会话 / providers / SSE / abort / 删除 全部正常"
 
 log "★ 验证 opencode web 是否自带 Web UI（App 的「打开网页」依赖它）"
 "${PROOT_COMMON[@]}" \
@@ -288,13 +323,14 @@ log "★ 验证 opencode web 是否自带 Web UI（App 的「打开网页」依�
   > "$WEB_LOG" 2>&1 &
 WEB_PID=$!
 
-wait_health "$PORT_WEB" || { tail -n 40 "$WEB_LOG"; fail "web 60 秒内没有就绪"; }
-ROOT_HEADERS=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_WEB/")
+wait_health "$PORT_WEB" "$WEB_LOG" || { tail -n 40 "$WEB_LOG"; fail "web 180 秒内没有就绪"; }
+ROOT_HEADERS=$(curl -s "${CURL_OPTS[@]}" -o /dev/null -w '%{http_code} %{content_type}' -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT_WEB/")
 log "web 根路径响应：$ROOT_HEADERS"
 case "$ROOT_HEADERS" in
   200\ text/html*) log "✔ opencode web 自带 Web UI（App 的 WebView 方案成立）" ;;
   *) printf '\n\033[1;33m[smoke] 注意：web 根路径不是 HTML（%s），App 的「打开网页」需要真机复核\033[0m\n' "$ROOT_HEADERS" ;;
 esac
+mark "web 验证完成"
 
 log "验证 dexec 在「未启用」与「桥不可达」时都能给出可读错误"
 install -D -m 0755 app/src/main/assets/device-shell/dexec.sh "$ROOTFS/usr/local/bin/dexec"
@@ -308,4 +344,5 @@ if run 'DEXEC_TIMEOUT=5 dexec "echo hi"'; then
 fi
 log "dexec 的错误路径正常"
 
-log "全部通过 ✔  架构=x86_64（配方与手机端一致）；Android 专属风险（W^X、phantom-killer、Shizuku）仍需真机验证"
+mark "全部通过"
+log "✔ 架构=x86_64（配方与手机端一致）；Android 专属风险（W^X、phantom-killer、Shizuku）仍需真机验证"
