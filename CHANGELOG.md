@@ -13,20 +13,34 @@
   **发布闸门**：`release` 现在同时依赖 `build` 与 `smoke`，每个 tag 都必须先通过真实运行时验证
 - **「本次改动」视图**：会话页标题栏进入，列出 agent 改过的文件与 `+/-` 统计，点进去看统一差分
   （本地 LCS 计算、彩色高亮、可复制差分或新内容；服务端只给统计时优雅退化为提示）
-- **测试 120 → 142 个**：统一差分（11）、proot 参数（6）、真实软链/硬链安全边界（4，Windows 跳过、Linux CI 会跑）等
+- **测试 120 → 148 个**：统一差分（11）、proot 参数（10）、真实软链/硬链安全边界（4，Windows 跳过、Linux CI 会跑）、CA bundle 判定（4）等
 
 ### 修复
+- **P0（真机级）容器缺 CA 证书导致 apt 的 https 源全量失败**：Ubuntu base 里没有 ca-certificates，
+  `apt-get update` 会以 `No system certificates available` 全量失败但**仍返回 0**（只有 W: 警告），
+  于是下一步才报 `Unable to locate package` —— 真机上表现为「安装基础工具」永远失败且看不出原因。
+  App 侧本来就有 `installSystemCaBundle()`（从 Android 系统证书库拼 PEM bundle），这轮把判定逻辑
+  抽成 `CaBundle`（含单测）并让三处失败信息给出「重跑第 2 步重新注入证书」的可操作提示
 - **P0（真机级）proot 参数写成短选项 `-L`**：冒烟测试第一次运行就暴露 Ubuntu 的 proot 5.1.0
   不认它；核对 APK 内置的 Termux proot ELF 后确认应使用长选项 `--sysvipc`（`--bind` 同理统一）。
   若真机上同样如此，容器会以 `unknown option '-L'` 直接启动失败 —— 参数单独抽成 `ProotArgs`
   并用单测钉住「只用长选项」的约定
+- **P0（真机级）proot 长选项传值方式**：`--bind /dev` 会被拒绝（长选项要求值紧跟 `=`），
+  必须写成一个 argv 元素 `--bind=/dev`；单测锁住这个约定
+- **Node 步骤不再因 npm 自检失败而中断**：Node 24 自带的 npm 在 proot 下会报
+  `Cannot find module …/walk-up-path/dist/commonjs/index.js`（文件其实存在且可读，
+  属于旧 proot 对新系统调用的支持问题；内置的 Termux proot 含 `statx`/`openat2`，手机上大概率没有）。
+  `node -v` 仍是硬性检查，npm 只记一条日志 —— opencode 本体是 Bun 二进制，不依赖 npm
 - **内置 proot 的能力纳入 CI 把关**：`tools/fetch-boot-runtime.mjs --check` 现在会扫描 proot
   的选项表，核对 App 依赖的 6 个长选项（`--rootfs/--cwd/--bind/--kill-on-exit/--link2symlink/--sysvipc`）
   都在；换 proot 版本会先在这里失败，而不是等到手机上
 - **tar 解压改用 `java.nio.file`**：软链/硬链在 JVM 单测里是**真实的**链接，
   「先放软链、再写同名文件」的逃逸防护与「目录软链被替换」终于有可执行的回归用例
 - `chmod` 在无 `Os.chmod` 的环境退化为 POSIX 权限设置，不再静默丢掉可执行位
-- 冒烟脚本按本机 proot 的能力探测选项（缺哪个跳过哪个并打警告），不再假设某一种构建
+- `install-tools.sh` 自愈：apt 索引缺失时先自己 `apt-get update`（只重跑「安装基础工具」这一步、
+  或容器被清理过时不会再卡在 `Unable to locate package`）
+- 冒烟脚本按本机 proot 的能力探测选项（缺哪个跳过哪个并打警告），不再假设某一种构建；
+  所有 HTTP 探测都有超时（上一轮就是被一个没有超时的 curl 卡了 39 分钟）
 
 ### 供应链
 - 所有 GitHub Actions 固定到 commit SHA（附 `# v4` 之类的版本注释），避免上游 tag 漂移

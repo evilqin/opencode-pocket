@@ -60,7 +60,7 @@ git clone <this-repo> && cd opencode-pocket
 node tools/fetch-boot-runtime.mjs
 
 # 2) 单元测试 + 构建
-./gradlew :app:testDebugUnitTest    # 142 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / tar 安全 / 差分 / proot 参数）
+./gradlew :app:testDebugUnitTest    # 148 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / tar 安全 / 差分 / proot 参数）
 ./gradlew :app:assembleDebug        # 产物：app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assembleRelease      # 默认用 debug 签名，可直接安装
 
@@ -162,7 +162,7 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 开发机上已经实际构建并通过以下检查（Windows + JDK 25 + Gradle 9.5 + AGP 9.3.3）：
 
-- **142 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
+- **148 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
   `opencode.json` 生成、环境变量映射、版本比较（含 `24.04.10 > 24.04.9` 这种坑）、
   **上游文件解析（Node index.json 的 `files` 字段、Ubuntu 目录列表、SHA256SUMS 文本）**、
   Markdown 解析、格式化输出；以及**安装状态合并 / SSE 解析 / 设置编解码 / 摘要与文件操作 /
@@ -190,9 +190,15 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 | 执行 `setup-apt.sh` + `install-tools.sh` | apt 源与 keyring、**apt + dpkg 在 proot 假 root 下真的能装包** |
 | `git init/commit` | 容器里的 git 可用（opencode 的快照与回滚依赖它） |
 | 走镜像直取 Node 与 opencode（`SHASUMS256` / `dist.shasum` 校验） | 「从镜像直取二进制」这条路可行，包校验字段确实存在 |
-| `opencode --version` | **Bun 二进制在 proot 下能不能跑**（整个项目最大的未知） |
-| 起 `serve` 与 `web`，跑健康检查 / 会话 / providers / agent / SSE / 401 鉴权 / abort / 删除 | 原生客户端依赖的 REST + SSE 契约与口令注入成立；`web` 是否自带 UI |
+| `opencode --version` | **Bun 二进制在 proot 下能不能跑**（整个项目最大的未知）——✅ 通过 |
+| 起 `serve` 与 `web`，跑健康检查 / 会话 / providers / agent / SSE / 401 鉴权 / abort / 删除 | 原生客户端依赖的 REST + SSE 契约与口令注入成立；`web` 根路径返回 `200 text/html`（WebView 方案成立） |
 | `dexec` 在未启用 / 桥不可达时的报错 | 设备桥脚本的错误路径可读 |
+
+> 与真机的差异：CI 用的是发行版打包的 proot（Ubuntu 24.04 是 **5.1.0**，2016 年的版本），
+> 手机里内置的是 **Termux 的 proot 5.1.107.96**（含 `statx` / `openat2` / `faccessat2` 等新系统调用）。
+> 个别依赖新系统调用的程序在 CI 上会失败而真机正常 —— 例如 Node 24 自带的 npm 在 CI 里
+> 报 `Cannot find module …/walk-up-path/…`（文件其实在、也能读），手机上大概率没这个问题；
+> 即使有，App 也不再因此中断安装（npm 只记一条日志）。
 
 必须拿到真机才能验证的部分（CI 覆盖不到）：
 
@@ -203,13 +209,30 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 ## 1.3.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
 
-- **CI 里真的把容器跑一遍**：Linux + proot 全流程（rootfs → 脚本 → Node/opencode → 服务与 API），
-  并作为发布闸门；第一次运行就抓出 proot 短选项 `-L` 在部分构建不存在的真机级问题
-- **统一改用长选项**（`--sysvipc` / `--bind`），参数抽成 `ProotArgs` 由单测钉住，
+- **CI 里真的把容器跑一遍**：Linux + proot 全流程（rootfs → 脚本 → apt/dpkg → Node/opencode → 服务与 API → web UI），
+  并作为发布闸门。第一次跑就连着抓出**三个真机级问题**：
+  1. proot 短选项 `-L` 在部分构建里不存在（容器会以 `unknown option` 直接启动失败）
+  2. 长选项必须写成 `--bind=xxx` 一个 argv 元素（`--bind /dev` 被拒绝）
+  3. 容器里没有 CA 证书导致 https 的 apt 源全量失败，而 `apt-get update` 仍然返回 0
+- **统一改用长选项**（`--sysvipc` / `--bind=`），参数抽成 `ProotArgs` 由单测钉住，
   CI 还会扫描内置 proot 二进制复核这些选项名
 - **新增「本次改动」视图**：文件列表 + 增删统计 + 本地计算的彩色统一差分
 - **tar 解压改用 `java.nio.file`**：软链/硬链防护在单测里可验证（不再是空转）
-- 单元测试 120 → 142；GitHub Actions 全部固定到 commit SHA
+- 单元测试 120 → 148；GitHub Actions 全部固定到 commit SHA
+
+### 手机端验收清单（下一步要做的）
+
+装了 1.3.0 之后，按这个顺序过一遍最省事（有问题就把「设置 → 导出日志」发我）：
+
+1. **安装环境**：安装页 →「全线测速」→「一键安装」→ 4 步都过（重点看第 3 步 `apt` 与第 4 步 `opencode`）；
+2. **服务**：首页 →「启动服务」→ 状态变绿，通知栏出现「OpenCode 服务」；
+3. **配 Key**：设置 → 模型与密钥 → 填一个 provider 的 Key →「保存并重启服务」；
+4. **对话**：对话页 → 新建会话 → 发一句「你好」→ 应该看到流式回复；
+5. **改动视图**：让 agent 写一个文件（例如「在 workspace 里创建 hello.txt」）→ 会话页右上角「本次改动」→ 应看到文件与增删行；
+6. **终端**：终端页 `opencode --version`、`git --version`、`cd /root/workspace && ls`；
+7. **网页**：首页 →「打开网页」→ 应看到 opencode 官方 Web UI；
+8. **设备桥（可选）**：设置里开启设备 Shell（需装 Shizuku 并授权）→ 容器里 `dexec 'getprop ro.product.model'`；
+9. **长跑**：让 agent 跑一个 10 分钟以上的任务，看通知栏状态、进度与「停止」是否正常。
 
 ## 1.2.0 重点
 
