@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">OpenCode Pocket</string>
+    <string name="shortcut_start_short">Start server</string>
+    <string name="shortcut_start_long">Start the opencode server inside the container</string>
+    <string name="shortcut_web_short">Open web UI</string>
+    <string name="shortcut_web_long">Open the official web UI</string>
 </resources>

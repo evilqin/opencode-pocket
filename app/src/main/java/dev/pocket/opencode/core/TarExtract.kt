@@ -133,11 +133,17 @@ object TarExtract {
         val mode = entry.mode and 0x1FF
 
         when {
+            // 设备节点 / FIFO 必须先判掉：commons-compress 的 isFile() 对这些类型也返回 true，
+            // 不管的话会把 /dev/null 这种条目写成空文件（容器的 /dev 就废了）
+            entry.isCharacterDevice || entry.isBlockDevice || entry.isFIFO -> stats.skipped++
+
             entry.isDirectory -> {
                 if (escapesTree(root, target)) {
                     stats.escaped++
                     return
                 }
+                // 同名位置如果是个符号链接，先删掉：否则 mkdirs/写入都会落到链接目标（可能树外）
+                FileOps.clearIfSymlink(target)
                 target.mkdirs()
                 chmodQuiet(target, mode or 0x1C0)
                 stats.files++
@@ -195,6 +201,9 @@ object TarExtract {
                     return
                 }
                 target.parentFile?.mkdirs()
+                // 关键一步：tarball 里「先放软链、再放同名文件」会把内容写到软链目标（可能树外），
+                // 所以写之前先把同名软链 unlink 掉。
+                FileOps.clearIfSymlink(target)
                 FileOutputStream(target).use { output ->
                     val buffer = ByteArray(256 * 1024)
                     var written = 0L

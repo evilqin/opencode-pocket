@@ -226,6 +226,15 @@ class Doctor(
             (connection as java.net.HttpURLConnection).apply {
                 connectTimeout = 1_500
                 readTimeout = 1_500
+                // 服务带 Basic 口令，这里也要带上，否则永远 401
+                val password = kotlinx.coroutines.runBlocking { settings.snapshot().serverPassword }
+                if (password.isNotBlank()) {
+                    val token = android.util.Base64.encodeToString(
+                        "opencode:$password".toByteArray(),
+                        android.util.Base64.NO_WRAP,
+                    )
+                    setRequestProperty("Authorization", "Basic $token")
+                }
             }
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             body.contains("healthy")

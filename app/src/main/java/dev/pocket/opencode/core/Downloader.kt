@@ -63,7 +63,14 @@ class Downloader(context: Context) {
     ): File = withContext(Dispatchers.IO) {
         val part = File(target.parentFile, target.name + ".part")
         target.parentFile?.mkdirs()
+
+        // 已有且摘要正确的文件直接复用：重试/换镜像/重装都不用重下几十 MB
+        if (expected != null && target.isFile && digestOf(target, expected.algorithm).equals(expected.hex, true)) {
+            onProgress(Progress(target.length(), target.length(), 0, url))
+            return@withContext target
+        }
         if (expected != null) part.delete()
+
         var attempt = 0
         var lastError: Exception? = null
         while (attempt < 3) {
@@ -130,13 +137,21 @@ class Downloader(context: Context) {
         val request = builder.build()
 
         client.newCall(request).execute().use { response ->
+            if (response.code == 416) {
+                // 请求的偏移超过服务端文件大小：多半是 .part 已经完整（或文件变小了），
+                // 删掉半成品从零重来，而不是让三次重试全撞 416
+                part.delete()
+                throw IOException("续传起点超出文件大小（已重置下载）")
+            }
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val body = response.body ?: throw IOException("空响应")
             val appending = response.code == 206
             if (appending) {
-                // 服务端必须从我们请求的偏移开始，否则续传会拼出坏文件
-                val start = response.header("Content-Range")?.substringAfter("bytes ")?.substringBefore('-')?.toLongOrNull()
-                if (start != null && start != existing) {
+                // 服务端必须明确给出续传区间，否则宁可从零重来（拼错的文件比慢更糟）
+                val start = response.header("Content-Range")
+                    ?.substringAfter("bytes ")?.substringBefore('-')?.toLongOrNull()
+                    ?: throw IOException("206 响应缺少 Content-Range，无法安全续传")
+                if (start != existing) {
                     throw IOException("服务端返回的续传区间不对：$start != $existing")
                 }
             }
@@ -146,9 +161,8 @@ class Downloader(context: Context) {
                 !appending && bodyLength >= 0 -> bodyLength
                 else -> -1L
             }
-            val mode = if (appending) "rw" else "w"
+            val mode = "rw" // 只有 r/rw/rws/rwd 合法；"w" 会抛 IllegalArgumentException
             if (!appending) part.delete()
-            val digest = expected?.let { MessageDigest.getInstance(it.algorithm) }
             RandomAccessFile(part, mode).use { output ->
                 if (appending) output.seek(existing)
                 var written = if (appending) existing else 0L
@@ -162,7 +176,6 @@ class Downloader(context: Context) {
                         val read = input.read(buffer)
                         if (read < 0) break
                         output.write(buffer, 0, read)
-                        digest?.update(buffer, 0, read)
                         written += read
                         windowBytes += read
                         val now = System.currentTimeMillis()

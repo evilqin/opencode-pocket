@@ -53,6 +53,34 @@ const ARTIFACTS = [
 
 const checkOnly = process.argv.includes("--check");
 
+/**
+ * 离线校验：拿仓库里提交的 boot-runtime.json 与 jniLibs 里的字节比对。
+ *
+ * 之前的实现是「先下载覆盖、再和自己比」，恒过 —— 等于没有把关；
+ * 现在 CI 只跑这个模式，保证发布出去的 APK 里就是仓库里审查过的那几个 ELF。
+ */
+function verifyAgainstManifest() {
+  if (!fs.existsSync(MANIFEST)) {
+    throw new Error("缺少 jniLibs/boot-runtime.json（先用不带 --check 的模式生成）");
+  }
+  const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
+  const expected = manifest.files ?? [];
+  if (expected.length !== ARTIFACTS.length) {
+    throw new Error(`清单里的文件数不对：${expected.length} != ${ARTIFACTS.length}`);
+  }
+  for (const item of expected) {
+    const name = path.basename(item.file ?? "");
+    const local = path.join(OUT_DIR, name);
+    if (!fs.existsSync(local)) throw new Error(`jniLibs 缺少 ${name}`);
+    const digest = sha256(fs.readFileSync(local));
+    if (digest !== item.sha256) {
+      throw new Error(`${name} 与 boot-runtime.json 不一致（期望 ${item.sha256.slice(0, 16)}…，实际 ${digest.slice(0, 16)}…）`);
+    }
+    log(`校验通过 ${name} (${item.size} 字节)`);
+  }
+  log(`运行时身份：${(manifest.packages ?? []).map((p) => `${p.name}@${p.version}`).join(", ")}`);
+}
+
 function log(...args) {
   console.log("[boot-runtime]", ...args);
 }
@@ -174,6 +202,10 @@ async function fetchIndex(repo) {
 }
 
 async function main() {
+  if (checkOnly) {
+    verifyAgainstManifest();
+    return;
+  }
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 
@@ -208,7 +240,8 @@ async function main() {
       await download(`${repo}/${relative}`, local);
       if (sha256(fs.readFileSync(local)) !== expected) throw new Error(`${name} 摘要校验失败`);
     }
-    debFiles.push({ name, version: entry.get("Version"), file: local, sha256: digest });
+    // 只把来源 URL 写进清单，本机缓存路径只在内存里用
+    debFiles.push({ name, version: entry.get("Version"), url: `${repo}/${relative}`, sha256: digest, cacheFile: local });
     log(`${name} ${entry.get("Version")} -> ${path.basename(local)}`);
   }
 
@@ -216,14 +249,19 @@ async function main() {
   const unpackRoot = path.join(CACHE_DIR, "unpacked");
   fs.rmSync(unpackRoot, { recursive: true, force: true });
   for (const item of debFiles) {
-    const members = parseAr(fs.readFileSync(item.file));
+    const members = parseAr(fs.readFileSync(item.cacheFile));
     const data = members.find((m) => m.name.startsWith("data.tar"));
     if (!data) throw new Error(`${item.name}: deb 缺少 data.tar`);
     extractTarXz(data.data, path.join(unpackRoot, item.name));
   }
 
   // 4) 拷贝到 jniLibs
-  const manifest = { generatedAt: new Date().toISOString(), source: repo, packages: debFiles, files: [] };
+  const manifest = {
+    generatedAt: new Date().toISOString(),
+    source: repo,
+    packages: debFiles.map(({ name, version, url, sha256 }) => ({ name, version, url, sha256 })),
+    files: [],
+  };
   for (const [relative, target] of ARTIFACTS) {
     let source = null;
     for (const item of debFiles) {
@@ -239,19 +277,13 @@ async function main() {
     const bytes = fs.readFileSync(source);
     const digest = sha256(bytes);
     const targetPath = path.join(OUT_DIR, target);
-    if (checkOnly) {
-      if (!fs.existsSync(targetPath) || sha256(fs.readFileSync(targetPath)) !== digest) {
-        throw new Error(`${target} 与 Termux 远端不一致，请运行 fetch-boot-runtime.mjs`);
-      }
-    } else {
-      fs.writeFileSync(targetPath, bytes);
-      fs.chmodSync(targetPath, 0o644);
-    }
-    manifest.files.push({ target, size: bytes.length, sha256: digest });
-    log(`${checkOnly ? "校验" : "写入"} ${target} (${bytes.length} 字节)`);
+    fs.writeFileSync(targetPath, bytes);
+    fs.chmodSync(targetPath, 0o644);
+    manifest.files.push({ file: `jniLibs/arm64-v8a/${target}`, size: bytes.length, sha256: digest });
+    log(`写入 ${target} (${bytes.length} 字节)`);
   }
 
-  if (!checkOnly) fs.writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + "\n");
+  fs.writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + "\n");
   log("完成：内置运行时已就绪");
 }
 

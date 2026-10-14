@@ -63,7 +63,9 @@ class Proot(
             paths.internalWorkspace.mkdirs()
             return Workspace(paths.internalWorkspace, PocketPaths.Guest.WORKSPACE, false)
         }
-        val host = File(config.workspace)
+        // 路径必须过策略校验：绝不允许把 / 或 /data 这种目录当工作区挂进去
+        val normalized = WorkspacePolicy.normalize(config.workspace)
+        val host = File(normalized)
         // canWrite 在 Android 的 FUSE 上会撒谎：真的建个临时文件试试
         val usable = (host.isDirectory || host.mkdirs()) && FileOps.canReallyWrite(host)
         if (!usable) {
@@ -79,9 +81,12 @@ class Proot(
         extraBinds: List<Pair<File, String>> = emptyList(),
         cwd: String = PocketPaths.Guest.ROOT,
     ): MutableList<String> {
+        val workspace = resolveWorkspace(config)
+
         val argv = mutableListOf<String>()
         argv += paths.prootBin.absolutePath
-        if (!hardlinkSupported()) {
+        // 外部工作区在 FUSE 上：宿主侧硬链接本来就不支持，同样需要 link2symlink 模拟
+        if (!hardlinkSupported() || workspace.external) {
             argv += "--link2symlink"
             val l2s = File(paths.rootfs, ".l2s").apply { mkdirs() }
             argv += "-b"
@@ -104,12 +109,12 @@ class Proot(
             paths.shmDir.absolutePath to "/dev/shm",
         )
         if (File("/vendor").isDirectory) binds += "/vendor" to "/vendor"
-        if (File("/storage/emulated/0").isDirectory) {
+        // 整个共享存储默认不挂：容器只需要看到用户选的工作区，不该顺带看到相册与其它 App 数据
+        if (config.exposeSdcard && File("/storage/emulated/0").isDirectory) {
             binds += "/storage/emulated/0" to "/sdcard"
             binds += "/storage/emulated/0" to "/storage/emulated/0"
         }
 
-        val workspace = resolveWorkspace(config)
         if (workspace.host.absolutePath != paths.internalWorkspace.absolutePath || !workspace.external) {
             workspace.host.mkdirs()
         }

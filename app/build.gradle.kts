@@ -12,8 +12,8 @@ android {
         applicationId = "dev.pocket.opencode"
         minSdk = 30
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.1.1"
+        versionCode = 4
+        versionName = "1.2.0"
 
         // 只支持 arm64：内置的 proot 运行时与 Ubuntu rootfs 都是 aarch64。
         ndk { abiFilters += "arm64-v8a" }
@@ -23,15 +23,32 @@ android {
         localeFilters += listOf("zh", "en")
     }
 
+    signingConfigs {
+        // 可选的正式签名：CI 里用 secrets 注入 keystore（保证覆盖安装签名一致）；
+        // 没配置时退回 debug 签名，方便直接安装体验。
+        create("pocket") {
+            val path = System.getenv("POCKET_KEYSTORE_PATH")
+            if (path != null && file(path).exists()) {
+                storeFile = file(path)
+                storePassword = System.getenv("POCKET_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("POCKET_KEY_ALIAS") ?: "pocket"
+                keyPassword = System.getenv("POCKET_KEY_PASSWORD")
+                    ?: System.getenv("POCKET_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }
         release {
-            // 个人项目：默认用 debug 签名，方便直接出正式包；接 CI 时可换成自己的 keystore。
-            signingConfig = signingConfigs.getByName("debug")
-            // 需要更小的包时：./gradlew assembleRelease -Ppocket.minify=true（R8 会重写代码，务必真机回归）
+            // 有正式 keystore 就用它；否则用 debug 签名（能装、能覆盖）。
+            // 注意：启用 R8 时务必真机回归（./gradlew assembleRelease -Ppocket.minify=true）
+            signingConfig =
+                if (signingConfigs.getByName("pocket").storeFile != null) signingConfigs.getByName("pocket")
+                else signingConfigs.getByName("debug")
             val minify = (project.findProperty("pocket.minify") as String?)?.toBoolean() ?: false
             isMinifyEnabled = minify
             isShrinkResources = minify

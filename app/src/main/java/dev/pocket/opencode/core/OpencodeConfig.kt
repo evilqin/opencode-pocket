@@ -121,6 +121,11 @@ object OpencodeConfig {
         }
         // 自定义端点的 baseURL 只写进 provider.options，不要塞进 OPENAI_BASE_URL，
         // 否则会把真正的 OpenAI provider 也指到自定义地址上。
+        // 本机 127.0.0.1 对同机所有 App 开放：必须带口令，否则任何 App 都能驱动 agent
+        if (settings.serverPassword.isNotBlank()) {
+            env["OPENCODE_SERVER_PASSWORD"] = settings.serverPassword
+            env["OPENCODE_SERVER_USERNAME"] = "opencode"
+        }
         env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
         env["OPENCODE_DISABLE_TERMINAL_TITLE"] = "1"
         env["BROWSER"] = "/bin/true"

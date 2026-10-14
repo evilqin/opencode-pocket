@@ -61,63 +61,81 @@ class DeviceShellManager(
 
     private suspend fun doSync() {
         val config = settings.snapshot()
-        val token = ensureToken(config)
         val available = shizuku.available()
         val granted = shizuku.permissionGranted()
         val shouldRun = config.deviceShell && available && granted
 
-        val identity = if (shouldRun) runCatching { shizuku.identity() }.getOrNull() else null
-
-        if (shouldRun) {
-            val current = server
-            // 没起来、或者端口被改过，都要重建监听
-            if (current == null || !current.isRunning || current.listeningPort != config.deviceShellPort) {
-                current?.stop()
-                val created = DeviceShellServer(config.deviceShellPort, token) { command, timeout ->
-                    shizuku.exec(command, timeout)
-                }
-                try {
-                    created.start()
-                    server = created
-                } catch (error: Exception) {
-                    server = null
-                    _status.value = Status(
-                        enabled = true,
-                        available = available,
-                        granted = granted,
-                        running = false,
-                        port = config.deviceShellPort,
-                        message = "端口 ${config.deviceShellPort} 启动失败：${error.message}",
-                    )
-                    // 端口没起来就不要把容器里的配置写成“可用”
-                    writeContainerFiles(enabled = false, config = config, token = token)
-                    return
-                }
-            }
-        } else {
+        if (!shouldRun) {
             server?.stop()
             server = null
             runCatching { shizuku.disconnect() }
-            // 关掉就作废旧令牌，下次开启换一把新的
+            // 关掉就作废旧令牌（不留一把永不生效的令牌躺在设置里）
             if (config.deviceShellToken.isNotEmpty()) {
                 settings.update { it.copy(deviceShellToken = "") }
             }
+            val problems = writeContainerFiles(enabled = false, config = config, token = "")
+            _status.value = Status(
+                enabled = config.deviceShell,
+                available = available,
+                granted = granted,
+                running = false,
+                port = config.deviceShellPort,
+                identity = null,
+                message = when {
+                    !config.deviceShell -> "未开启"
+                    !available -> "Shizuku 没有在运行（先启动 Shizuku，再用无线调试或 root 启动）"
+                    else -> "等待 Shizuku 授权"
+                } + if (problems.isEmpty()) "" else "（容器文件写入失败：${problems.first()}）",
+            )
+            return
         }
 
-        writeContainerFiles(enabled = shouldRun, config = config, token = token)
+        val token = ensureToken(config)
+        val identity = runCatching { shizuku.identity() }.getOrNull()
 
+        val current = server
+        // 没起来、或者端口被改过，都要重建监听
+        if (current == null || !current.isRunning || current.listeningPort != config.deviceShellPort) {
+            current?.stop()
+            val created = DeviceShellServer(
+                port = config.deviceShellPort,
+                token = token,
+                guard = { command -> if (config.deviceShellGuard) CommandGuard.check(command) else null },
+                onAudit = { line -> audit(line) },
+            ) { command, timeout ->
+                runOnDevice(command, timeout)
+            }
+            try {
+                created.start()
+                server = created
+            } catch (error: Exception) {
+                server = null
+                _status.value = Status(
+                    enabled = true,
+                    available = available,
+                    granted = granted,
+                    running = false,
+                    port = config.deviceShellPort,
+                    message = "端口 ${config.deviceShellPort} 启动失败：${error.message}",
+                )
+                // 端口没起来就不要把容器里的配置写成“可用”
+                writeContainerFiles(enabled = false, config = config, token = token)
+                return
+            }
+        }
+
+        val problems = writeContainerFiles(enabled = true, config = config, token = token)
         _status.value = Status(
-            enabled = config.deviceShell,
+            enabled = true,
             available = available,
             granted = granted,
             running = server?.isRunning == true,
             port = server?.listeningPort ?: config.deviceShellPort,
             identity = identity,
-            message = when {
-                !config.deviceShell -> "未开启"
-                !available -> "Shizuku 没有在运行（先启动 Shizuku，再用无线调试或 root 启动）"
-                !granted -> "等待 Shizuku 授权"
-                else -> "运行中 · 身份 ${identity ?: "?"} · 127.0.0.1:${server?.listeningPort ?: config.deviceShellPort}"
+            message = buildString {
+                append("运行中 · 身份 ${identity ?: "?"} · 127.0.0.1:${server?.listeningPort ?: config.deviceShellPort}")
+                append(if (config.deviceShellGuard) " · 危险命令防护已开启" else " · 防护已关闭")
+                if (problems.isNotEmpty()) append("（容器文件写入失败：${problems.first()}）")
             },
         )
     }
@@ -133,6 +151,39 @@ class DeviceShellManager(
         }
     }
 
+    private suspend fun runOnDevice(command: String, timeoutMs: Long) = shizuku.exec(command, timeoutMs)
+
+    /** 每次桥调用（含被拦）写一行审计：谁在什么时候要求手机做什么。 */
+    private fun audit(line: String) {
+        val stamped = "[${java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())}] $line"
+        scope.launch {
+            runCatching {
+                val file = File(paths.logsDir, "device-shell.log")
+                if (file.length() > MAX_AUDIT_BYTES) {
+                    val backup = File(paths.logsDir, "device-shell.log.1")
+                    backup.delete()
+                    file.renameTo(backup)
+                }
+                file.appendText(stamped + "\n")
+            }
+        }
+    }
+
+    /** 给设置页看的最近审计（不包含 token 等敏感内容）。 */
+    suspend fun auditTail(maxLines: Int = 30): List<String> = withContext(Dispatchers.IO) {
+        val file = File(paths.logsDir, "device-shell.log")
+        if (!file.isFile) return@withContext emptyList()
+        runCatching { file.readLines().takeLast(maxLines) }.getOrDefault(emptyList())
+    }
+
+    /** 换一把新令牌（旧令牌立即失效）。 */
+    fun rotateToken() {
+        scope.launch {
+            settings.update { it.copy(deviceShellToken = "") }
+            syncNow()
+        }
+    }
+
     private suspend fun ensureToken(config: AppSettings): String {
         if (config.deviceShellToken.isNotBlank()) return config.deviceShellToken
         val token = UUID.randomUUID().toString().replace("-", "")
@@ -140,9 +191,10 @@ class DeviceShellManager(
         return token
     }
 
-    /** 把容器里的三份文件写成与当前状态一致。 */
-    private suspend fun writeContainerFiles(enabled: Boolean, config: AppSettings, token: String) {
-        if (!paths.rootfsLooksInstalled()) return
+    /** 把容器里的三份文件写成与当前状态一致；返回失败原因（空表示都写好了）。 */
+    private suspend fun writeContainerFiles(enabled: Boolean, config: AppSettings, token: String): List<String> {
+        if (!paths.rootfsLooksInstalled()) return listOf("容器还没安装")
+        val failures = mutableListOf<String>()
         // 注意：rootfs 是容器的 /，而 opencode 读的是 /root/.config/opencode
         val configDir = File(paths.rootfs, "root/.config/opencode")
 
@@ -152,17 +204,19 @@ class DeviceShellManager(
             dexec.parentFile?.mkdirs()
             dexec.writeText(assetText("device-shell/dexec.sh"))
             Os.chmod(dexec.absolutePath, 0b111_101_101)
-        }
+        }.onFailure { failures += "dexec：${it.message}" }
 
-        // 2) pocket.json
+        // 2) pocket.json（0600：容器里只有 root 能读，别让 npm/git 里的东西顺手读到令牌）
         runCatching {
             configDir.mkdirs()
             val json = JSONObject()
                 .put("enabled", enabled)
                 .put("port", if (enabled) (server?.listeningPort ?: config.deviceShellPort) else config.deviceShellPort)
                 .put("token", token)
-            File(configDir, "pocket.json").writeText(json.toString(2))
-        }
+            val file = File(configDir, "pocket.json")
+            file.writeText(json.toString(2))
+            runCatching { Os.chmod(file.absolutePath, 0b110_000_000) } // 0600
+        }.onFailure { failures += "pocket.json：${it.message}" }
 
         // 3) skill：只有真正能用的时候才让 agent 看到
         val skillDir = File(configDir, "skills/device-shell")
@@ -173,7 +227,9 @@ class DeviceShellManager(
             } else {
                 File(skillDir, "SKILL.md").delete()
             }
-        }
+        }.onFailure { failures += "SKILL.md：${it.message}" }
+
+        return failures
     }
 
     private fun assetText(name: String): String =
@@ -181,5 +237,6 @@ class DeviceShellManager(
 
     companion object {
         const val DEFAULT_PORT = 3090
+        private const val MAX_AUDIT_BYTES = 256L shl 10 // 256 KiB
     }
 }

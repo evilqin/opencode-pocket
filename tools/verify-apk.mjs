@@ -21,7 +21,14 @@ import zlib from "node:zlib";
 const ROOT = path.resolve(import.meta.dirname, "..");
 const JNI_DIR = path.join(ROOT, "app", "src", "main", "jniLibs", "arm64-v8a");
 const REQUIRED_LIBS = ["libproot.so", "libprootloader.so", "libtalloc.so", "libandroidshmem.so"];
-const REQUIRED_ASSETS = ["assets/scripts/profile.sh", "assets/scripts/setup-apt.sh", "assets/scripts/install-tools.sh", "assets/scripts/setup-env.sh"];
+const REQUIRED_ASSETS = [
+  "assets/scripts/profile.sh",
+  "assets/scripts/setup-apt.sh",
+  "assets/scripts/install-tools.sh",
+  "assets/scripts/setup-env.sh",
+  "assets/device-shell/dexec.sh",
+  "assets/device-shell/SKILL.md",
+];
 
 /** 极简 zip 读取：只处理 stored(0) 与 deflate(8)，够做自检。 */
 function openZip(file) {
@@ -155,26 +162,44 @@ function main() {
     problems.push(`APK 缺少原生库：${libMethods.join(", ")}`);
   }
 
-  // 5) 有 aapt2 的话，进一步核对合并后的 manifest（extractNativeLibs / 组件 / FGS 类型）
+  // 5) 有 aapt2 的话，进一步核对合并后的 manifest（extractNativeLibs / 组件 / FGS 类型 / 版本号）
   const aapt2 = findAapt2();
-  if (aapt2) {
-    const dump = runAapt2(aapt2, apkPath);
-    if (dump == null) {
-      console.warn("[verify-apk] 有 aapt2 但解析 manifest 失败，跳过 manifest 校验");
+  const dump = aapt2 ? runAapt2(aapt2, apkPath) : null;
+  if (aapt2 && dump == null) {
+    console.warn("[verify-apk] 有 aapt2 但解析 manifest 失败，跳过 manifest 校验");
+  } else if (dump) {
+    const expectations = [
+      ["extractNativeLibs", /extractNativeLibs\(0x010104ea\)=true/],
+      ["前台服务类型 SPECIAL_USE", /foregroundServiceType\(0x01010599\)=0x40000000/],
+      ["MainActivity", /"dev\.pocket\.opencode\.MainActivity"/],
+      ["ServerService", /"dev\.pocket\.opencode\.service\.ServerService"/],
+      ["ShizukuProvider", /"rikka\.shizuku\.ShizukuProvider"/],
+    ];
+    for (const [label, pattern] of expectations) {
+      if (!pattern.test(dump)) problems.push(`manifest 校验失败：${label}`);
+    }
+
+    // 版本号必须与 app/build.gradle.kts 一致（防止发出名字对不上的包）
+    const gradle = fs.readFileSync(path.join(ROOT, "app", "build.gradle.kts"), "utf8");
+    const expectName = /versionName\s*=\s*"([^"]+)"/.exec(gradle)?.[1];
+    const expectCode = /versionCode\s*=\s*(\d+)/.exec(gradle)?.[1];
+    if (!expectName || !expectCode) {
+      problems.push("读不到 app/build.gradle.kts 里的 versionName/versionCode");
     } else {
-      const expectations = [
-        ["extractNativeLibs", /extractNativeLibs\(0x010104ea\)=true/],
-        ["前台服务类型 SPECIAL_USE", /foregroundServiceType\(0x01010599\)=0x40000000/],
-        ["MainActivity", /"dev\.pocket\.opencode\.MainActivity"/],
-        ["ServerService", /"dev\.pocket\.opencode\.service\.ServerService"/],
-        ["ShizukuProvider", /"rikka\.shizuku\.ShizukuProvider"/],
-      ];
-      for (const [label, pattern] of expectations) {
-        if (!pattern.test(dump)) problems.push(`manifest 校验失败：${label}`);
+      const actualName = /versionName\(0x0101021c\)="([^"]+)"/.exec(dump)?.[1];
+      // aapt2 的两种输出形态都兼容：`=4` / `=(type 0x10)0x4`
+      const codeMatch = /versionCode\(0x0101021b\)=(?:\(type 0x10\))?(?:0x([0-9a-f]+)|(\d+))/.exec(dump);
+      const actualCode = codeMatch ? (codeMatch[1] ? parseInt(codeMatch[1], 16) : parseInt(codeMatch[2], 10)) : null;
+      const allowed = [expectName, `${expectName}-debug`];
+      if (!actualName || !allowed.includes(actualName)) {
+        problems.push(`versionName 不一致：APK=${actualName ?? "?"}，gradle=${expectName}`);
+      }
+      if (actualCode !== Number(expectCode)) {
+        problems.push(`versionCode 不一致：APK=${actualCode ?? "?"}，gradle=${expectCode}`);
       }
     }
   } else {
-    console.warn("[verify-apk] 没有找到 aapt2（设置 ANDROID_HOME 或用 CI 跑），跳过 manifest 校验");
+    console.warn("[verify-apk] 没有找到 aapt2（设置 ANDROID_HOME 或用 CI 跑），跳过 manifest 与版本校验");
   }
 
   // 6) Shizuku 用户服务是「按类名从 APK 加载」的（不是 manifest 组件，R8 也不能改名）：

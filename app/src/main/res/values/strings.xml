@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">OpenCode 口袋</string>
+    <string name="shortcut_start_short">启动服务</string>
+    <string name="shortcut_start_long">启动容器里的 opencode 服务</string>
+    <string name="shortcut_web_short">打开网页</string>
+    <string name="shortcut_web_long">打开官方 Web UI</string>
 </resources>

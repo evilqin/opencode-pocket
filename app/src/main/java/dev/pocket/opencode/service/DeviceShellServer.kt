@@ -6,7 +6,9 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -19,17 +21,25 @@ import org.json.JSONObject
  *   POST /exec                    → 直接在手机本体上执行命令
  *        Header: Authorization: Bearer <token>
  *        Body:   纯文本命令（默认），或 JSON {"cmd":"...","timeoutMs":30000}
- *        Query:  ?format=json       → 返回结构化结果；默认返回纯文本输出 + 退出码
+ *        Query:  ?format=json       → 返回结构化结果；默认返回纯文本输出
+ *        状态码: 200 成功 / 500 命令非 0 退出 / 504 命令超时 / 403 被危险命令防护拦下 /
+ *                401 未认证 / 400 请求不合法 / 501 不支持的传输方式 / 431 头部过大
  *
- * 实现细节（踩过的坑）：
- *   - 请求行/头逐字节读，body 也按 **字节** 读 Content-Length 再整体 UTF-8 解码；
- *     用 BufferedReader 按字符读会在含中文的命令上卡到 socket 超时；
- *   - `Expect: 100-continue` 直接回 100，避免客户端等一秒才发 body；
- *   - stop() 会关掉 socket、shutdown 线程池，避免反复开关时留下两个 accept 循环。
+ * 实现要点（都踩过坑）：
+ *   - 请求行/头逐字节读、body 按 **字节** 读 Content-Length 再整体 UTF-8 解码
+ *     （用字符读会在含中文的命令上卡到 socket 超时）；
+ *   - **先认证再谈别的**：没 token 就不发 100-continue、也不读 body；
+ *   - 头部有条数/总长度上限，拒绝 Transfer-Encoding（不做 chunked）；
+ *   - 线程池有界：慢速连接打满后就拒绝新连接，不会无限吃内存；
+ *   - 危险命令防护 + 每次执行写审计（含被拦的）。
  */
 class DeviceShellServer(
     private val port: Int,
     private val token: String,
+    /** 危险命令防护：返回非 null 表示拒绝执行（原因给 agent 看）。 */
+    private val guard: (String) -> String? = { null },
+    /** 每次执行（含被拦）都回调一行审计文本。 */
+    private val onAudit: (String) -> Unit = {},
     private val execute: suspend (String, Long) -> dev.pocket.opencode.core.ShizukuBridge.Result,
 ) {
 
@@ -37,9 +47,19 @@ class DeviceShellServer(
     private var serverSocket: ServerSocket? = null
 
     private val running = AtomicBoolean(false)
-    private val workers = Executors.newFixedThreadPool(4) { runnable ->
-        Thread(runnable, "device-shell-bridge").apply { isDaemon = true }
-    }
+
+    /** 有界线程池：队列满了直接拒绝（close socket），避免慢速攻击把内存吃干。start() 里重建。 */
+    private var workers = newWorkerPool()
+
+    private fun newWorkerPool() = ThreadPoolExecutor(
+        2,
+        4,
+        30,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(16),
+        { runnable -> Thread(runnable, "device-shell-bridge").apply { isDaemon = true } },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
 
     val isRunning: Boolean get() = running.get()
 
@@ -48,6 +68,8 @@ class DeviceShellServer(
 
     fun start() {
         if (running.getAndSet(true)) return
+        // stop() 会 shutdownNow，所以每次启动都新建一个有界线程池
+        workers = newWorkerPool()
         try {
             val socket = ServerSocket()
             socket.reuseAddress = true
@@ -66,7 +88,12 @@ class DeviceShellServer(
                 } catch (_: Exception) {
                     continue
                 }
-                workers.execute { runCatching { handle(client) } }
+                try {
+                    workers.execute { runCatching { handle(client) } }
+                } catch (_: java.util.concurrent.RejectedExecutionException) {
+                    // 队列满：宁可拒绝这个连接，也不能无限排队
+                    runCatching { client.close() }
+                }
             }
         }, "device-shell-accept").apply { isDaemon = true }.start()
     }
@@ -94,27 +121,42 @@ class DeviceShellServer(
             val query = target.substringAfter('?', "")
 
             val headers = LinkedHashMap<String, String>()
+            var headerBytes = 0
             while (true) {
                 val line = readLine(input) ?: break
                 if (line.isEmpty()) break
+                headerBytes += line.length + 2
+                if (headers.size > MAX_HEADER_COUNT || headerBytes > MAX_HEADER_TOTAL) {
+                    return respond(client, 431, "text/plain", "headers too large")
+                }
                 val index = line.indexOf(':')
                 if (index > 0) headers[line.substring(0, index).trim().lowercase()] = line.substring(index + 1).trim()
             }
 
-            // curl 对 >1KB 的 body 会先等 100-continue
-            if (headers["expect"]?.contains("100-continue", ignoreCase = true) == true) {
-                runCatching {
-                    client.getOutputStream().write("HTTP/1.1 100 Continue\r\n\r\n".toByteArray())
-                    client.getOutputStream().flush()
-                }
+            // 1) 认证永远排在前面：没通过就不处理 body、不发 100-continue
+            val authHeader = headers["authorization"].orEmpty()
+            // 严格 Bearer 前缀，别接受裸 token
+            val provided = if (authHeader.length > 7 && authHeader.substring(0, 7).equals("Bearer ", true)) {
+                authHeader.substring(7).trim()
+            } else {
+                ""
+            }
+            if (!tokenEquals(provided, token)) {
+                return respond(client, 401, "application/json", """{"error":"unauthorized"}""")
             }
 
-            val authorized = tokenEquals(
-                headers["authorization"]?.removePrefix("Bearer ")?.trim().orEmpty(),
-                token,
-            )
-            if (!authorized) {
-                return respond(client, 401, "application/json", """{"error":"unauthorized"}""")
+            // 2) 不做 chunked：直接拒绝，避免解析歧义
+            if (headers["transfer-encoding"] != null) {
+                return respond(client, 501, "application/json", """{"error":"transfer-encoding not supported"}""")
+            }
+
+            // 3) curl 对 >1KB 的 body 会先等 100-continue（此时已经通过认证）
+            if (headers["expect"]?.contains("100-continue", ignoreCase = true) == true) {
+                runCatching {
+                    val output = client.getOutputStream()
+                    output.write("HTTP/1.1 100 Continue\r\n\r\n".toByteArray())
+                    output.flush()
+                }
             }
 
             when {
@@ -122,21 +164,52 @@ class DeviceShellServer(
                     respond(client, 200, "application/json", """{"ok":true,"bridge":"opencode-pocket"}""")
 
                 method == "POST" && path == "/exec" -> {
-                    val length = headers["content-length"]?.toIntOrNull() ?: 0
-                    if (length > MAX_BODY) return respond(client, 413, "text/plain", "body too large")
+                    val length = headers["content-length"]?.toIntOrNull()
+                    if (length == null || length < 0) {
+                        return respond(client, 411, "application/json", """{"error":"content-length required"}""")
+                    }
+                    if (length > MAX_BODY) {
+                        return respond(client, 413, "application/json", """{"error":"body too large"}""")
+                    }
                     val bytes = readExactly(input, length)
                     val payload = String(bytes, Charsets.UTF_8)
                     val json = runCatching { JSONObject(payload) }.getOrNull()
                     val command = (json?.optString("cmd") ?: payload).trim()
-                    // 超时可来自 JSON body，也可来自 X-Dexec-Timeout-Ms 头（容器里的 dexec 用的是后者）
                     val headerTimeout = headers["x-dexec-timeout-ms"]?.toLongOrNull()
-                    val timeout = (json?.optLong("timeoutMs") ?: headerTimeout ?: DEFAULT_TIMEOUT_MS)
+                    // 注意：不能写 json?.optLong("timeoutMs") ?: header —— 合法 JSON 但没有该字段时
+                    // optLong 返回 0，会被夹成 1 秒，长命令莫名超时
+                    val bodyTimeout = json?.takeIf { it.has("timeoutMs") }?.optLong("timeoutMs")
+                    val timeout = (bodyTimeout ?: headerTimeout ?: DEFAULT_TIMEOUT_MS)
                         .coerceIn(1_000, MAX_TIMEOUT_MS)
                     if (command.isEmpty()) {
                         return respond(client, 400, "application/json", """{"error":"empty command"}""")
                     }
+
+                    // 4) 危险命令防护：先拦再执行（原因给 agent，也写审计）
+                    val blocked = runCatching { guard(command) }.getOrNull()
+                    if (blocked != null) {
+                        onAudit("BLOCKED  $command   （$blocked）")
+                        return respond(
+                            client,
+                            403,
+                            "application/json",
+                            JSONObject()
+                                .put("error", "blocked-by-guard")
+                                .put("reason", blocked)
+                                .put("hint", "这条命令被危险命令防护拦下；请让用户在 App 内确认，或到设置里关闭防护")
+                                .toString(),
+                        )
+                    }
+
                     val result = runBlocking { execute(command, timeout) }
-                    val asJson = query.contains("format=json") ||
+                    onAudit(
+                        buildString {
+                            append(if (result.timedOut) "TIMEOUT" else "exit=${result.exitCode}")
+                            append("  ")
+                            append(command.take(200))
+                        },
+                    )
+                    val asJson = query.split('&').any { it.equals("format=json", true) } ||
                         headers["accept"]?.contains("application/json") == true
                     if (asJson) {
                         val body = JSONObject()
@@ -144,7 +217,7 @@ class DeviceShellServer(
                             .put("timedOut", result.timedOut)
                             .put("stdout", result.stdout.take(MAX_OUTPUT))
                             .put("stderr", result.stderr.take(MAX_OUTPUT))
-                        respond(client, 200, "application/json", body.toString())
+                        respond(client, if (result.exitCode == 0) 200 else 500, "application/json", body.toString())
                     } else {
                         val text = buildString {
                             append(result.stdout.take(MAX_OUTPUT))
@@ -154,7 +227,12 @@ class DeviceShellServer(
                             }
                             if (result.timedOut) append("\n[命令超时，已被终止]\n")
                         }
-                        respond(client, if (result.exitCode == 0) 200 else 500, "text/plain; charset=utf-8", text)
+                        val status = when {
+                            result.timedOut -> 504
+                            result.exitCode != 0 -> 500
+                            else -> 200
+                        }
+                        respond(client, status, "text/plain; charset=utf-8", text)
                     }
                 }
 
@@ -170,9 +248,11 @@ class DeviceShellServer(
         while (true) {
             val current = input.read()
             if (current < 0) return if (buffer.size() == 0) null else buffer.toString("ISO-8859-1")
-            if (previous == '\r'.code && current == '\n'.code) {
+            // 规范要求 CRLF，但有些客户端只发 LF：两种都接受
+            if (current == '\n'.code) {
                 val bytes = buffer.toByteArray()
-                return String(bytes, 0, (bytes.size - 1).coerceAtLeast(0), Charsets.ISO_8859_1)
+                val length = if (previous == '\r'.code) (bytes.size - 1).coerceAtLeast(0) else bytes.size
+                return String(bytes, 0, length, Charsets.ISO_8859_1)
             }
             buffer.write(current)
             previous = current
@@ -212,9 +292,14 @@ class DeviceShellServer(
         200 -> "OK"
         400 -> "Bad Request"
         401 -> "Unauthorized"
+        403 -> "Forbidden"
         404 -> "Not Found"
+        411 -> "Length Required"
         413 -> "Payload Too Large"
+        431 -> "Request Header Fields Too Large"
         500 -> "Internal Server Error"
+        501 -> "Not Implemented"
+        504 -> "Gateway Timeout"
         else -> "OK"
     }
 
@@ -226,8 +311,10 @@ class DeviceShellServer(
     private companion object {
         const val MAX_BODY = 1 shl 20          // 1 MiB
         const val MAX_HEADER_LINE = 8 shl 10   // 单行请求头最长 8 KiB
+        const val MAX_HEADER_COUNT = 32        // 请求头最多 32 行
+        const val MAX_HEADER_TOTAL = 32 shl 10 // 请求头总量最多 32 KiB
         const val MAX_OUTPUT = 256 shl 10      // 单次输出最多 256 KiB
         const val DEFAULT_TIMEOUT_MS = 60_000L
-        const val MAX_TIMEOUT_MS = 30 * 60_000L
+        const val MAX_TIMEOUT_MS = 10 * 60_000L // 与 Shizuku 用户服务的上限保持一致
     }
 }

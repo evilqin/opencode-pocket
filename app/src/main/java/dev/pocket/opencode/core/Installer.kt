@@ -113,26 +113,16 @@ class Installer(
     suspend fun refresh() = withContext(Dispatchers.IO) {
         val records = readState()
         val disk = detectOnDisk()
-        val steps = InstallStep.entries.map { step ->
-            val record = records[step.id]
-            when {
-                // 磁盘上确实在：补齐 DONE（升级/手工改动后自愈）
-                disk[step] == true -> StepSnapshot(step, StepState.DONE, record?.detail.orEmpty(), progress = 1f)
-                // 正在进行中的步骤不要被刷新打断
-                _state.value.running == step -> _state.value.step(step)
-                // 失败信息要留住：用户随时能看到哪一步为什么失败
-                record?.state == StepState.FAILED -> record
-                record?.state == StepState.SKIPPED -> record
-                // 记录说完成但磁盘上没了（例如手动删了 rootfs）：退回待安装
-                record?.state == StepState.DONE -> StepSnapshot(step, StepState.PENDING, record.detail)
-                record != null -> record
-                else -> StepSnapshot(step)
-            }
-        }
+        val steps = InstallState.merge(
+            records = records,
+            disk = disk,
+            running = _state.value.running,
+            current = { step -> _state.value.step(step) },
+        )
         _state.update {
             it.copy(
                 steps = steps,
-                installed = isInstalled(steps, settings.snapshot()),
+                installed = InstallState.isInstalled(steps, settings.snapshot().installNode),
             )
         }
         _versions.value = loadVersions()
@@ -171,6 +161,10 @@ class Installer(
                 }
                 _state.update { it.copy(running = null, message = "安装完成") }
             } catch (cancelled: CancellationException) {
+                // 被取消的步骤不能留在 RUNNING：它已经不会继续跑了，界面得允许重试
+                _state.value.running?.let { step ->
+                    updateStep(step, StepState.PENDING, detail = "已取消")
+                }
                 _state.update { it.copy(running = null, message = "已取消") }
                 throw cancelled
             } catch (error: Exception) {
@@ -220,9 +214,15 @@ class Installer(
             cancel()
             log("等待当前任务停止后再清理…")
             runCatching { job?.join() }
+            if (job?.isActive == true) {
+                throw IllegalStateException("安装任务还在运行，请稍后再试")
+            }
         }
         log("开始清理容器环境…")
         FileOps.deleteTree(paths.rootfs)
+        // 半途留下的中间目录也要清，否则「已删除」之后还能剩几百 MB
+        FileOps.deleteTree(File(paths.home, "ubuntu.new"))
+        FileOps.deleteTree(File(paths.home, "ubuntu.old"))
         FileOps.deleteTree(paths.tmpDir)
         FileOps.deleteTree(paths.libDir)
         FileOps.deleteTree(paths.downloadDir)
@@ -269,9 +269,12 @@ class Installer(
     }
 
     private suspend fun stepRootfs(config: AppSettings): String {
+        // 峰值用量：下载包 + 新 rootfs + 旧 rootfs 同时存在，1.2 GB 是个务实下限
         val free = freeSpaceBytes()
-        if (free in 1 until 400L * 1024 * 1024) {
-            throw IllegalStateException("存储空间不足：至少需要 400 MB 空闲（当前 ${free / 1024 / 1024} MB）")
+        if (free > 0 && free < MIN_FREE_BYTES) {
+            throw IllegalStateException(
+                "存储空间不足：至少需要 ${MIN_FREE_BYTES / 1024 / 1024} MB 空闲（当前 ${free / 1024 / 1024} MB）",
+            )
         }
         val mirror = Mirrors.find(Mirrors.ubuntu, config.ubuntuMirror)
         setProgress(0.01f, "查找镜像文件…")
@@ -304,7 +307,7 @@ class Installer(
         }
         if (expected != null) log("rootfs 摘要校验通过")
 
-        // 先解压到 ubuntu.new，自检通过后再整体替换：中途失败不会把能用的环境毁掉
+        // 先解压到 ubuntu.new：自检通过后再整体替换，失败则回滚，避免把能用的环境毁掉
         setProgress(0.72f, "解压中…")
         val staging = File(paths.home, "ubuntu.new")
         FileOps.deleteTree(staging)
@@ -325,24 +328,31 @@ class Installer(
                 ""
             })
 
-        // 换上去，并写入基础配置
-        FileOps.replaceDirectory(staging, paths.rootfs)
-        writeGuestFile("/etc/profile.d/90-pocket.sh", assetText("scripts/profile.sh"), 0b110_100_100)
-        net.writeResolvConf()
-        installSystemCaBundle()
+        val backup = FileOps.beginSwap(staging, paths.rootfs)
+        try {
+            writeGuestFile("/etc/profile.d/90-pocket.sh", assetText("scripts/profile.sh"), 0b110_100_100)
+            net.writeResolvConf()
+            installSystemCaBundle()
 
-        setProgress(0.95f, "自检…")
-        val check = shell.run(
-            "uname -m && . /etc/os-release && echo \$PRETTY_NAME && id -u",
-            config,
-            timeoutMs = 90_000,
-            isCanceled = { cancelRequested },
-        )
-        if (!check.success) {
-            throw IllegalStateException("rootfs 自检失败：${check.text.takeLast(400)}")
+            setProgress(0.95f, "自检…")
+            val check = shell.run(
+                "uname -m && . /etc/os-release && echo \$PRETTY_NAME && id -u",
+                config,
+                timeoutMs = 90_000,
+                isCanceled = { cancelRequested },
+            )
+            if (!check.success) {
+                throw IllegalStateException("rootfs 自检失败：${check.text.takeLast(400)}")
+            }
+            val arch = check.lines.firstOrNull()?.trim().orEmpty()
+            if (arch != "aarch64") throw IllegalStateException("rootfs 架构异常：$arch")
+        } catch (error: Exception) {
+            // 自检/写配置失败：把旧环境换回来（如果本来就没有旧环境，就清掉这份坏的）
+            runCatching { FileOps.rollbackSwap(backup, paths.rootfs) }
+                .onFailure { log("回滚失败，请到设置里删除环境后重装：${it.message}") }
+            throw error
         }
-        val arch = check.lines.firstOrNull()?.trim().orEmpty()
-        if (arch != "aarch64") throw IllegalStateException("rootfs 架构异常：$arch")
+        FileOps.finishSwap(backup)
 
         // 自检通过才删下载包（删早了失败就得重下 30 MB）
         file.delete()
@@ -354,13 +364,21 @@ class Installer(
         val apt = Mirrors.find(Mirrors.apt, config.aptMirror)
         net.writeResolvConf()
         installSystemCaBundle()
-        // Ubuntu base 不带 CA；如果连系统 CA 也拿不到，就只能退回 http 源，否则 apt 会卡在 TLS 校验
-        val hasCa = File(paths.rootfs, "etc/ssl/certs/ca-certificates.crt").let { it.isFile && it.length() > 0 }
-        val aptBase = if (hasCa) apt.base else apt.base.replace("https://", "http://")
-        log("apt 源：${apt.name}（$aptBase${if (hasCa) "" else "，无 CA 暂用 http"}）")
+        // apt 必须走 HTTPS 且校验包签名：没有 CA 就明确失败，别静默降级成明文源
+        val hasCa = File(paths.rootfs, "etc/ssl/certs/ca-certificates.crt").let { it.isFile && it.length() > 8 * 1024 }
+        if (!hasCa) {
+            throw IllegalStateException(
+                "容器里没有 CA 证书，无法安全地安装软件包。" +
+                    "请确认设备系统证书可读（正常机型都有），或换一个支持 HTTPS 的镜像源后重试。",
+            )
+        }
+        if (apt.base.startsWith("http://")) {
+            throw IllegalStateException("当前 apt 源是明文 http（${apt.name}），请在安装页换成 https 源后重试。")
+        }
         val distro = detectUbuntuCodename() ?: "noble"
+        log("apt 源：${apt.name}（${apt.base}，发行版 $distro）")
         val script = assetText("scripts/setup-apt.sh")
-            .replace("@APT_MIRROR@", aptBase)
+            .replace("@APT_MIRROR@", apt.base)
             .replace("@DISTRO@", distro)
         writeGuestFile("/root/.pocket/setup-apt.sh", script, 0b111_101_101)
         writeGuestFile("/root/.pocket/install-tools.sh", assetText("scripts/install-tools.sh"), 0b111_101_101)
@@ -424,9 +442,14 @@ class Installer(
         if (expected != null) log("Node 摘要校验通过")
 
         setProgress(0.82f, "解压 Node…")
-        if (File(paths.rootfs, "usr/local/bin/node").exists()) {
-            FileOps.deleteTree(File(paths.rootfs, "usr/local/lib/node_modules"))
-        }
+        // 换镜像/LTS 版本时把旧 Node 清干净，否则 include/lib 里头和库会混版本
+        listOf(
+            "usr/local/lib/node_modules",
+            "usr/local/include/node",
+            "usr/local/share/doc/node",
+            "usr/local/share/man/man1/node.1",
+        ).forEach { relative -> FileOps.deleteTree(File(paths.rootfs, relative)) }
+        listOf("node", "npm", "npx").forEach { name -> File(paths.rootfs, "usr/local/bin/$name").delete() }
         val dest = File(paths.rootfs, "usr/local")
         TarExtract.extract(
             archive = file,
@@ -551,8 +574,10 @@ class Installer(
     private suspend fun detectUbuntuCodename(): String? = withContext(Dispatchers.IO) {
         val osRelease = File(paths.rootfs, "etc/os-release")
         if (!osRelease.isFile) return@withContext null
-        osRelease.readLines().firstOrNull { it.startsWith("VERSION_CODENAME=") }
+        val value = osRelease.readLines().firstOrNull { it.startsWith("VERSION_CODENAME=") }
             ?.substringAfter('=')?.trim('"')
+        // 这个值会被拼进 apt 源脚本：必须是纯小写字母，否则可能被投毒的 rootfs 注入命令
+        value?.takeIf { it.matches(Regex("^[a-z]{3,20}$")) }
     }
 
     private fun writeGuestFile(guestPath: String, content: String, mode: Int) {
@@ -630,9 +655,7 @@ class Installer(
     }
 
     private fun isInstalled(steps: List<StepSnapshot>, config: AppSettings): Boolean =
-        steps
-            .filter { !it.step.optional || (it.step == InstallStep.NODE && config.installNode) }
-            .all { it.state == StepState.DONE || (it.step == InstallStep.NODE && it.state == StepState.SKIPPED) }
+        InstallState.isInstalled(steps, config.installNode)
 
     /** 从磁盘探测真实安装情况（升级/手动改动后也能自愈）。注意 guest 路径要带 root/ 前缀。 */
     private fun detectOnDisk(): Map<InstallStep, Boolean> = linkedMapOf(
@@ -742,5 +765,8 @@ class Installer(
     private companion object {
         const val MAX_LOG_LINES = 600
         const val MAX_LOG_BYTES = 2L shl 20 // 2 MiB
+
+        /** 安装期间的最小空闲空间（下载包 + 新 rootfs + 旧 rootfs 的峰值）。 */
+        const val MIN_FREE_BYTES = 1200L * 1024 * 1024
     }
 }

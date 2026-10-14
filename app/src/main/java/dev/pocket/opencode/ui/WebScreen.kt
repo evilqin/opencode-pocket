@@ -56,6 +56,7 @@ import dev.pocket.opencode.ui.components.EmptyState
 fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
     val context = LocalContext.current
     val server by engine.server.status.collectAsStateWithLifecycle()
+    val appSettings by engine.settings.settings.collectAsStateWithLifecycle()
     var progress by remember { mutableIntStateOf(0) }
     var failed by remember { mutableStateOf<String?>(null) }
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -163,9 +164,13 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                                 settings.domStorageEnabled = true
                                 settings.databaseEnabled = true
                                 settings.allowFileAccess = false
+                                settings.allowContentAccess = false
+                                settings.setAllowFileAccessFromFileURLs(false)
+                                settings.setAllowUniversalAccessFromFileURLs(false)
                                 settings.mediaPlaybackRequiresUserGesture = false
                                 settings.setSupportZoom(false)
                                 settings.textZoom = 100
+                                val password = appSettings.serverPassword
                                 webView = this
                                 webViewClient = object : WebViewClient() {
                                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -190,14 +195,32 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                                         view: WebView?,
                                         request: WebResourceRequest?,
                                     ): Boolean {
-                                        val url = request?.url?.toString() ?: return false
-                                        return if (url.contains("127.0.0.1") || url.contains("localhost")) {
-                                            false
+                                        val target = request?.url ?: return false
+                                        val scheme = target.scheme?.lowercase().orEmpty()
+                                        val host = target.host?.lowercase().orEmpty()
+                                        val isLocal = scheme in listOf("http", "https") &&
+                                            host in listOf("127.0.0.1", "localhost", "::1", "[::1]")
+                                        if (isLocal) return false
+                                        // 非本机地址一律交给外部浏览器/系统处理
+                                        runCatching {
+                                            ctx.startActivity(Intent(Intent.ACTION_VIEW, target))
+                                        }
+                                        return true
+                                    }
+
+                                    override fun onReceivedHttpAuthRequest(
+                                        view: WebView?,
+                                        handler: android.webkit.HttpAuthHandler?,
+                                        host: String?,
+                                        realm: String?,
+                                    ) {
+                                        // 服务带 Basic 口令（OPENCODE_SERVER_PASSWORD）：自动回填，别让用户看到 401
+                                        if (password.isNotBlank() &&
+                                            host?.lowercase() in listOf("127.0.0.1", "localhost", "::1")
+                                        ) {
+                                            handler?.proceed("opencode", password)
                                         } else {
-                                            runCatching {
-                                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                                            }
-                                            true
+                                            handler?.cancel()
                                         }
                                     }
                                 }

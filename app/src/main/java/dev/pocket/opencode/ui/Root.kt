@@ -116,6 +116,16 @@ fun PocketRoot(engine: PocketEngine) {
         }
     }
 
+    // 快捷方式 / 通知进来的深链：切到对应页面
+    val deepLink by dev.pocket.opencode.core.DeepLinks.requested.collectAsStateWithLifecycle()
+    LaunchedEffect(deepLink) {
+        when (deepLink) {
+            "web" -> routeName = Route.WebName
+            "setup" -> routeName = Route.SetupName
+        }
+        if (deepLink != null) dev.pocket.opencode.core.DeepLinks.consume()
+    }
+
     if (route == Route.Web) {
         WebScreen(engine) { routeName = Route.HomeName }
         return

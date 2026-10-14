@@ -13,6 +13,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -53,6 +55,10 @@ class ServerService : Service() {
             ACTION_STOP -> scope.launch {
                 engine.server.stop(engine.settings.snapshot())
                 releaseWakeLock()
+                runCatching {
+                    androidx.core.app.NotificationManagerCompat.from(this@ServerService)
+                        .cancel(Notifications.ID_SERVER)
+                }
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -75,6 +81,14 @@ class ServerService : Service() {
     private fun startObserving() {
         if (observeJob?.isActive == true) return
         observeJob = scope.launch {
+            // WakeLock 续期：状态流在值不变时不会重新发射，所以不能只在状态跳变时续期，
+            // 否则连续运行超过 60 分钟后锁会静默过期（长任务是这个应用的核心场景）。
+            launch {
+                while (isActive) {
+                    delay(WAKELOCK_RENEW_INTERVAL_MS)
+                    if (engine.server.status.value.phase == ServerPhase.RUNNING) acquireWakeLock()
+                }
+            }
             engine.server.status.collect { status ->
                 val text = when (status.phase) {
                     ServerPhase.RUNNING -> "127.0.0.1:${status.port}  ·  v${status.version.ifBlank { "?" }}"
@@ -96,13 +110,12 @@ class ServerService : Service() {
                             this@ServerService,
                             title = title,
                             text = text,
-                            running = status.phase != ServerPhase.STOPPED,
-                            showStop = status.phase == ServerPhase.RUNNING || status.phase == ServerPhase.STARTING,
+                            // 失败态也别做成不可划掉的常驻通知：允许停止，也允许划走
+                            running = status.phase == ServerPhase.RUNNING || status.phase == ServerPhase.STARTING,
+                            showStop = status.phase != ServerPhase.STOPPED,
                         ),
                     )
                 }
-                // 服务在跑就续一把 WakeLock（带超时，避免异常情况下永久持有）
-                if (status.phase == ServerPhase.RUNNING) acquireWakeLock()
             }
         }
     }
@@ -138,5 +151,8 @@ class ServerService : Service() {
 
         /** 单次 WakeLock 最长 60 分钟，服务运行时会自动续期。 */
         private const val WAKELOCK_TIMEOUT_MS = 60 * 60 * 1000L
+
+        /** 续期间隔：比超时短一半，保证锁不会过期。 */
+        private const val WAKELOCK_RENEW_INTERVAL_MS = 30 * 60 * 1000L
     }
 }

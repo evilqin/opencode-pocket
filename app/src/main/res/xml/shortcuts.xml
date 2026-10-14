@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_notification"
+        android:shortcutId="start_service"
+        android:shortcutLongLabel="@string/shortcut_start_long"
+        android:shortcutShortLabel="@string/shortcut_start_short">
+        <intent
+            android:action="dev.pocket.opencode.START_SERVICE"
+            android:targetClass="dev.pocket.opencode.MainActivity"
+            android:targetPackage="dev.pocket.opencode" />
+    </shortcut>
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher_foreground"
+        android:shortcutId="open_web"
+        android:shortcutLongLabel="@string/shortcut_web_long"
+        android:shortcutShortLabel="@string/shortcut_web_short">
+        <intent
+            android:action="dev.pocket.opencode.OPEN_WEB"
+            android:targetClass="dev.pocket.opencode.MainActivity"
+            android:targetPackage="dev.pocket.opencode" />
+    </shortcut>
+
+</shortcuts>

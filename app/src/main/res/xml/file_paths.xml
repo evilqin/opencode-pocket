@@ -2,5 +2,4 @@
 <paths>
     <files-path name="logs" path="linux/logs/" />
     <files-path name="exports" path="exports/" />
-    <cache-path name="cache" path="." />
 </paths>

@@ -30,10 +30,10 @@
 | Web UI | 内嵌 WebView 打开 `opencode web` 的官方界面，可跳外部浏览器 |
 | 终端 | 类 shell 的命令执行（cwd 保持），快捷命令；安装日志 / 运行日志各一份，可复制可分享 |
 | 设置 | 12 个常用 provider 的 API Key、默认模型、端口、权限策略、低内存模式、工作区、主题、维护工具 |
-| 工作区 | 手机上的真实目录（默认 `/sdcard/OpenCode`）挂进容器 `/root/workspace`，容器里直接读写你的项目 |
+| 工作区 | 手机上的真实目录（默认 `/sdcard/OpenCode`）挂进容器 `/root/workspace`；共享存储默认**不**整体挂载 |
 | 一键体检 | 12 项只读检查（架构/运行时/rootfs/git/opencode/域名解析/空间/端口/密钥/权限…），结果可一键复制 |
-| 设备 Shell 桥 | 可选：通过 **Shizuku** 让容器里的 agent 用 `dexec` 在手机本体上执行命令（读设备信息、剪贴板、系统目录） |
-| 安全默认 | `share: disabled`、`autoupdate: false`、密钥写在应用私有目录、不采集任何数据 |
+| 设备 Shell 桥 | 可选：通过 **Shizuku** 让容器里的 agent 用 `dexec` 在手机本体执行命令（含危险命令防护与审计日志） |
+| 安全默认 | 本机服务带随机口令（`OPENCODE_SERVER_PASSWORD`）、`share: disabled`、`autoupdate: false`、权限策略默认 `ask`、密钥只写应用私有目录、零遥测 |
 
 ---
 
@@ -45,10 +45,10 @@
 2. 手机需要 **ARM64**，Android **11（API 30）及以上**。
 3. 安装后打开 → 「开始安装」→ 选镜像 → 等 5 分钟左右。
 
-> 仓库里的 `dist/` 放了三份构建产物（当前 1.1.0）：
-> `*-arm64.apk`（标准包，28.1 MB，未混淆，最稳）、
+> 仓库里的 `dist/` 放了三份构建产物（当前 1.2.0）：
+> `*-arm64.apk`（标准包，28.2 MB，未混淆，最稳）、
 > `*-arm64-slim.apk`（R8 精简包，**4.1 MB**，体积小但需要真机回归一遍）、
-> `*-debug.apk`（调试包，36.5 MB，日志最全）。
+> `*-debug.apk`（调试包，37.0 MB，日志最全）。
 
 ### 方式二：自己构建
 
@@ -59,7 +59,7 @@ git clone <this-repo> && cd opencode-pocket
 node tools/fetch-boot-runtime.mjs
 
 # 2) 单元测试 + 构建
-./gradlew :app:testDebugUnitTest    # 50 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
+./gradlew :app:testDebugUnitTest    # 120 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
 ./gradlew :app:assembleDebug        # 产物：app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assembleRelease      # 默认用 debug 签名，可直接安装
 
@@ -70,7 +70,7 @@ node tools/fetch-boot-runtime.mjs
 **发布新版本**：改 `app/build.gradle.kts` 里的 `versionCode` / `versionName`，然后推一个同名标签即可自动构建并发布 Release（CI 会先校验 tag 与 versionName 一致）：
 
 ```bash
-git tag v1.1.2 && git push origin v1.1.2
+git tag v1.2.1 && git push origin v1.2.1
 ```
 
 环境要求：JDK 21+、Android SDK（platform 37 + build-tools 36.0.0）、Node 20+（只用来跑取件脚本）。
@@ -156,10 +156,10 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 开发机上已经实际构建并通过以下检查（Windows + JDK 25 + Gradle 9.5 + AGP 9.3.3）：
 
-- **41 → 50 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
+- **50 → 120 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
   `opencode.json` 生成、环境变量映射、版本比较（含 `24.04.10 > 24.04.9` 这种坑）、
   **上游文件解析（Node index.json 的 `files` 字段、Ubuntu 目录列表、SHA256SUMS 文本）**、
-  Markdown 解析、格式化输出；
+  Markdown 解析、格式化输出；以及**安装状态合并 / SSE 解析 / 设置编解码 / 摘要与文件操作 / tar 安全边界 / 危险命令防护 / 日志脱敏 / 工作区策略**；
 - **打包自检**（`tools/verify-apk.mjs`）：4 个内置 ELF 与 `jniLibs` **逐字节一致**（proot 的入口点没有被
   strip 改写）、只含 `arm64-v8a`、容器脚本齐全；有 aapt2 时进一步核对合并后的 manifest
   （`extractNativeLibs=true`、前台服务类型 `specialUse`、各组件名）；并直接在 dex 里确认
@@ -176,6 +176,14 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 - Shizuku 用户服务（`dexec`）的绑定与执行；
 - 各家 ROM 的省电策略与 Android 12+ 幻影进程限制；
 - R8 精简包的功能回归（所以默认发布的还是未混淆版本）。
+
+## 1.2.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
+
+- **本机服务加随机口令**：loopback 对同机所有 App 开放，现在 opencode 服务与设备桥都必须带口令/Bearer token
+- **默认权限策略改为 sk**，并且**不再默认把整个 /sdcard 挂进容器**
+- **设备桥危险命令防护 + 审计日志**；导出日志自动打码密钥与口令
+- 修复上一轮引入的 P0：非续传下载用非法模式、pkill 误杀 App 自身；rootfs 自检失败会回滚
+- 单元测试 50 → 120；CI 增加版本单调校验与可选正式签名
 
 ## 1.1.0 修复记录
 
@@ -216,6 +224,12 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 ```bash
 adb shell settings put global settings_enable_monitor_phantom_procs false
 ```
+
+**服务口令是干什么的？**
+opencode 服务监听 `127.0.0.1`，而 Android 的 loopback 对**同机所有 App** 开放 —— 不加口令的话，任何应用都能驱动你的 agent、读你的会话。所以 App 首启会生成一个随机口令，通过 `OPENCODE_SERVER_PASSWORD` 注入服务，App 自己的对话页 / 网页页 / 体检都带 Basic 认证（用户名固定 `opencode`）。你想用别的客户端连它（例如 `adb forward` 到电脑），在「设置 → 服务 → 服务口令」复制口令即可；也可随时点「重新生成服务口令」（需重启服务生效）。
+
+**容器能看到我的相册和微信导出的文件吗？**
+默认不能。容器只会挂上你选的工作区目录（`/root/workspace` ↔ 手机上的某个目录）；只有打开「设置 → 工作区 → 把整个共享存储挂进容器」，才会挂载 `/sdcard`。
 
 **能装到 x86 模拟器上吗？**
 不能。内置 proot 与 rootfs 都是 aarch64，`ndk.abiFilters` 也只保留 `arm64-v8a`。
@@ -264,7 +278,7 @@ app/src/main/java/dev/pocket/opencode/
 app/src/main/aidl/            Shizuku 用户服务的 Binder 接口（含 destroy 保留事务）
 app/src/main/assets/scripts/  容器内执行的 shell 脚本（apt、工具、收尾）
 app/src/main/assets/device-shell/  dexec 命令与 device-shell 技能模板
-app/src/test/                 50 个 JVM 单元测试（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
+app/src/test/                 120 个 JVM 单元测试（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
 tools/fetch-boot-runtime.mjs  拉取 Termux 官方 proot 运行时并校验，落到 jniLibs
 tools/verify-apk.mjs          打包自检：内置 ELF 是否被改、ABI、容器脚本、manifest、Shizuku 类
 tools/mirror-check.mjs        镜像源体检：25 个端点用真实请求逐个验证

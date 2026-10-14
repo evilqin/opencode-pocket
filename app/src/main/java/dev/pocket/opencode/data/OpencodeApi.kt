@@ -2,13 +2,17 @@ package dev.pocket.opencode.data
 
 import dev.pocket.opencode.core.Downloader
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -27,6 +31,7 @@ import org.json.JSONObject
 class OpencodeApi(
     downloads: Downloader,
     private val portProvider: () -> Int,
+    private val passwordProvider: () -> String = { "" },
 ) {
 
     private val client: OkHttpClient = downloads.http.newBuilder()
@@ -47,6 +52,22 @@ class OpencodeApi(
 
     private fun url(path: String) = "http://127.0.0.1:${portProvider()}$path"
 
+    /**
+     * 本机 HTTP 服务带 Basic 口令（OPENCODE_SERVER_PASSWORD）：
+     * 127.0.0.1 对同机所有 App 开放，不带口令等于把 agent 交给任何应用。
+     */
+    private fun authorized(builder: Request.Builder): Request.Builder {
+        val password = passwordProvider()
+        if (password.isNotBlank()) {
+            val token = android.util.Base64.encodeToString(
+                "opencode:$password".toByteArray(Charsets.UTF_8),
+                android.util.Base64.NO_WRAP,
+            )
+            builder.header("Authorization", "Basic $token")
+        }
+        return builder
+    }
+
     // ---------------------------------------------------------------- 基础请求
 
     private suspend fun getJson(path: String): JSONObject = withContext(Dispatchers.IO) {
@@ -65,7 +86,7 @@ class OpencodeApi(
     }
 
     private suspend fun getText(path: String): String = withContext(Dispatchers.IO) {
-        client.newCall(Request.Builder().url(url(path)).build()).execute().use { response ->
+        client.newCall(authorized(Request.Builder().url(url(path))).build()).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw ApiException(response.code, body.take(300))
             body
@@ -74,7 +95,7 @@ class OpencodeApi(
 
     private suspend fun post(path: String, body: JSONObject?): JSONObject? = withContext(Dispatchers.IO) {
         val payload = (body ?: JSONObject()).toString()
-        val request = Request.Builder().url(url(path)).post(payload.toRequestBody(jsonType)).build()
+        val request = authorized(Request.Builder().url(url(path)).post(payload.toRequestBody(jsonType))).build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw ApiException(response.code, text.take(300))
@@ -83,13 +104,13 @@ class OpencodeApi(
     }
 
     private suspend fun delete(path: String): Boolean = withContext(Dispatchers.IO) {
-        client.newCall(Request.Builder().url(url(path)).delete().build()).execute().use { response ->
+        client.newCall(authorized(Request.Builder().url(url(path)).delete()).build()).execute().use { response ->
             response.isSuccessful
         }
     }
 
     private suspend fun patch(path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(url(path)).patch(body.toString().toRequestBody(jsonType)).build()
+        val request = authorized(Request.Builder().url(url(path)).patch(body.toString().toRequestBody(jsonType))).build()
         client.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) throw ApiException(response.code, text.take(300))
@@ -185,44 +206,52 @@ class OpencodeApi(
      *
      * 重连成功后会额外发一条 `{"type":"resync"}`，让上层重新拉一次历史
      * （断线期间漏掉的事件不会自己补回来）。
+     *
+     * 实现用 callbackFlow：收集方取消时会 `call.cancel()` 把阻塞中的读取打断，
+     * 否则离开会话页后事件流会一直挂着（读超时为 0，没人能中断它）。
      */
-    fun events(): Flow<JSONObject> = flow {
-        var connectedBefore = false
-        while (true) {
-            try {
-                val request = Request.Builder()
-                    .url(url("/event"))
-                    .header("Accept", "text/event-stream")
-                    .header("Cache-Control", "no-cache")
-                    .build()
-                sseClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) throw ApiException(response.code, "event stream")
-                    val source = response.body?.source() ?: return@use
-                    if (connectedBefore) {
-                        emit(JSONObject().put("type", "resync"))
-                    }
-                    connectedBefore = true
-                    val data = StringBuilder()
-                    while (true) {
-                        val line = source.readUtf8Line() ?: break
-                        when {
-                            line.isEmpty() -> {
-                                if (data.isNotEmpty()) {
-                                    val payload = data.toString()
-                                    data.clear()
-                                    runCatching { emit(JSONObject(payload)) }
-                                }
-                            }
-                            line.startsWith("data:") -> data.append(line.removePrefix("data:").trim())
+    fun events(): Flow<JSONObject> = callbackFlow {
+        val activeCall = AtomicReference<Call?>(null)
+        val worker = launch(Dispatchers.IO) {
+            var connectedBefore = false
+            while (isActive) {
+                try {
+                    val request = authorized(
+                        Request.Builder()
+                            .url(url("/event"))
+                            .header("Accept", "text/event-stream")
+                            .header("Cache-Control", "no-cache"),
+                    ).build()
+                    val call = sseClient.newCall(request)
+                    activeCall.set(call)
+                    call.execute().use { response ->
+                        if (!response.isSuccessful) throw ApiException(response.code, "event stream")
+                        val source = response.body?.source() ?: return@use
+                        if (connectedBefore) {
+                            trySend(JSONObject().put("type", "resync"))
                         }
+                        connectedBefore = true
+                        val parser = SseParser()
+                        while (isActive) {
+                            val line = source.readUtf8Line() ?: break
+                            val payload = parser.feed(line) ?: continue
+                            runCatching { JSONObject(payload) }.getOrNull()?.let { trySend(it) }
+                        }
+                        parser.reset()
                     }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // 服务没起来或断线：稍后重连
+                } finally {
+                    activeCall.set(null)
                 }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                // 服务没起来或断线：稍后重连
+                delay(1500)
             }
-            delay(1500)
         }
-    }.flowOn(Dispatchers.IO)
+        awaitClose {
+            activeCall.get()?.cancel()
+            worker.cancel()
+        }
+    }
 }

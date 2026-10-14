@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  只放行本机回环的明文 HTTP：
+    - opencode 服务（127.0.0.1:4096）与设备 Shell 桥（127.0.0.1:3090）都是本机 HTTP；
+    - 其它一切域名仍然禁止明文，避免以后有人顺手把整个 App 开成明文。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">::1</domain>
+    </domain-config>
+</network-security-config>

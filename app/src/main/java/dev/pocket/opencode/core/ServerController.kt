@@ -60,7 +60,7 @@ class ServerController(
     private val _status = MutableStateFlow(ServerStatus())
     val status: StateFlow<ServerStatus> = _status.asStateFlow()
 
-    private val _logs = MutableSharedFlow<String>(replay = 200, extraBufferCapacity = 512)
+    private val _logs = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 512)
     val logs: SharedFlow<String> = _logs.asSharedFlow()
 
     private val recent = ArrayDeque<String>()
@@ -72,6 +72,10 @@ class ServerController(
         .readTimeout(2, TimeUnit.SECONDS)
         .callTimeout(3, TimeUnit.SECONDS)
         .build()
+
+    /** 最近一次启动用的口令（健康检查与状态轮询复用）。 */
+    @Volatile
+    private var _lastPassword: String = ""
 
     private var process: Process? = null
     private var readerJob: Job? = null
@@ -87,6 +91,15 @@ class ServerController(
         if (isAlive()) return true
         if (startJob?.isActive == true) return false
 
+        if (settings.serverPassword.isBlank()) {
+            _status.value = _status.value.copy(
+                phase = ServerPhase.ERROR,
+                error = "服务口令还没生成",
+                hint = "重开一次 App（或点一次启动）会自动生成",
+            )
+            return false
+        }
+        _lastPassword = settings.serverPassword
         if (!paths.rootfsLooksInstalled() ||
             !File(paths.rootfs, PocketPaths.Guest.OPENCODE_BIN.trimStart('/')).isFile
         ) {
@@ -106,10 +119,10 @@ class ServerController(
                 proot.stageBootRuntime()
                 net.writeResolvConf()
 
-                // 清掉上次残留的进程（用 [o]pencode 这种写法避免 pkill 匹配到自己这条命令行）
+                // 清掉上次残留的进程：按 guest 里记录的 pid 精确杀（见 CLEANUP_COMMAND 的注释）
                 runCatching {
                     shell.run(
-                        "pkill -9 -f '[o]pencode' >/dev/null 2>&1; sleep 0.5; true",
+                        CLEANUP_COMMAND,
                         settings,
                         timeoutMs = 20_000,
                     )
@@ -119,11 +132,14 @@ class ServerController(
                 val env = OpencodeConfig.environment(settings)
                 val command =
                     "cd ${PocketPaths.Guest.WORKSPACE} 2>/dev/null || cd /root; " +
+                        // 记录 guest 侧的 pid：停止/清理时按 pid 精确杀。不要用 pkill -f opencode ——
+                        // App 自己的进程名里就带 opencode，而 /proc 被原样 bind 进容器，会误杀 App。
+                        "printf '%s' \$\$ > /tmp/opencode.pid; " +
                         "exec opencode web --hostname 127.0.0.1 --port ${settings.port}"
                 val started = withContext(Dispatchers.IO) {
                     proot.start(
                         command = command,
-                        config = settings.copy(port = settings.port),
+                        config = settings,
                         extraEnv = env,
                         cwd = PocketPaths.Guest.ROOT,
                     )
@@ -132,7 +148,7 @@ class ServerController(
                 readerJob = scope.launch { pump(started) }
 
                 _status.value = _status.value.copy(hint = "等待服务就绪…")
-                val healthy = awaitHealthy(settings.port, timeoutMs = 240_000)
+                val healthy = awaitHealthy(settings.port, settings.serverPassword, timeoutMs = 240_000)
                 if (!healthy) {
                     // 起不来就别让它占着端口：先杀掉再报错
                     withContext(Dispatchers.IO) {
@@ -161,6 +177,8 @@ class ServerController(
                     hint = "",
                 )
                 appendLog("✔ 服务已就绪：${baseUrl(settings.port)}（v${_status.value.version}）")
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 appendLog("✘ 启动失败：${error.message}")
                 _status.value = _status.value.copy(
@@ -194,7 +212,7 @@ class ServerController(
         }
         runCatching {
             shell.run(
-                "pkill -9 -f '[o]pencode' >/dev/null 2>&1; true",
+                CLEANUP_COMMAND,
                 settings,
                 timeoutMs = 20_000,
             )
@@ -208,7 +226,7 @@ class ServerController(
         start(settings)
     }
 
-    private suspend fun awaitHealthy(port: Int, timeoutMs: Long): Boolean {
+    private suspend fun awaitHealthy(port: Int, password: String, timeoutMs: Long): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         var attempts = 0
         while (System.currentTimeMillis() < deadline) {
@@ -218,15 +236,24 @@ class ServerController(
                 val seconds = ((System.currentTimeMillis() - (deadline - timeoutMs)) / 1000)
                 appendLog("… 仍在等待服务就绪（${seconds}s）")
             }
-            val body = health(port)
+            val body = health(port, password)
             if (body != null && body.optBoolean("healthy", false)) return true
             delay(700)
         }
         return false
     }
 
-    private fun health(port: Int = _status.value.port): JSONObject? = try {
-        val request = Request.Builder().url("http://127.0.0.1:$port/global/health").build()
+    /** 本机服务带口令（OPENCODE_SERVER_PASSWORD），健康检查也要带上。 */
+    private fun health(port: Int = _status.value.port, password: String = _lastPassword): JSONObject? = try {
+        val builder = Request.Builder().url("http://127.0.0.1:$port/global/health")
+        if (password.isNotBlank()) {
+            val token = android.util.Base64.encodeToString(
+                "opencode:$password".toByteArray(),
+                android.util.Base64.NO_WRAP,
+            )
+            builder.header("Authorization", "Basic $token")
+        }
+        val request = builder.build()
         healthClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) null else response.body?.string()?.let { JSONObject(it) }
         }
@@ -276,7 +303,13 @@ class ServerController(
         if (!log.isFile || log.length() < MAX_LOG_BYTES) return
         val backup = File(log.parentFile, log.name + ".1")
         backup.delete()
-        log.renameTo(backup)
+        if (!log.renameTo(backup)) {
+            // 某些文件系统上 renameTo 会失败：退化成复制 + 截断，别让日志无限增长
+            runCatching {
+                log.copyTo(backup, overwrite = true)
+                java.io.RandomAccessFile(log, "rw").use { it.setLength(0) }
+            }
+        }
     }
 
     fun clearRecentLogs() {
@@ -288,5 +321,18 @@ class ServerController(
 
     private companion object {
         const val MAX_LOG_BYTES = 1L shl 20 // 1 MiB
+
+        /**
+         * 停止/清理容器里的服务：先按 /tmp/opencode.pid 精确杀，再用收窄后的模式兜底。
+         *
+         * 注意 **不要** 用 `pkill -f opencode`：App 自己的进程名里带 opencode，
+         * 而容器的 /proc 是宿主原样 bind 的，pkill 会按宿主 pid 把 App 一起杀掉。
+         */
+        val CLEANUP_COMMAND: String = buildString {
+            append("if [ -f /tmp/opencode.pid ]; then ")
+            append("kill -9 \"$(cat /tmp/opencode.pid)\" 2>/dev/null || true; ")
+            append("rm -f /tmp/opencode.pid; fi; ")
+            append("pkill -9 -f '[o]pencode web' >/dev/null 2>&1 || true; true")
+        }
     }
 }

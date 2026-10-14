@@ -4,9 +4,10 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -21,6 +22,12 @@ import kotlinx.coroutines.withContext
  *   - 输出行数有上限，避免 `yes` / 编译日志把内存打爆。
  */
 class GuestShell(private val proot: Proot) {
+
+    /**
+     * 看门狗与取消监视跑在独立作用域：调用方的协程被取消时，阻塞中的 readLine
+     * 不会响应取消 —— 必须靠外部协程把进程杀掉，否则 run() 永远不返回（线程 + 进程双泄漏）。
+     */
+    private val watcherScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     data class Output(
         val exitCode: Int,
@@ -61,43 +68,53 @@ class GuestShell(private val proot: Proot) {
         var cancelled = false
 
         try {
-            coroutineScope {
-                val watchdog = if (timeoutMs > 0) {
-                    launch(Dispatchers.IO) {
-                        delay(timeoutMs)
-                        timedOut = true
-                        runCatching { process.destroy() }
-                        delay(1_500)
+            // 看门狗（超时）与取消监视跑在独立作用域，不受调用方取消影响
+            val watchdog = if (timeoutMs > 0) {
+                watcherScope.launch {
+                    delay(timeoutMs)
+                    timedOut = true
+                    runCatching { process.destroy() }
+                    delay(1_500)
+                    runCatching { process.destroyForcibly() }
+                }
+            } else {
+                null
+            }
+            val cancelWatcher = watcherScope.launch {
+                while (!cancelled && process.isAlive) {
+                    if (isCanceled()) {
+                        cancelled = true
                         runCatching { process.destroyForcibly() }
+                        break
                     }
-                } else {
-                    null
+                    delay(200)
                 }
-                try {
-                    withContext(Dispatchers.IO) {
-                        val reader = BufferedReader(InputStreamReader(process.inputStream), 64 * 1024)
-                        while (true) {
-                            if (isCanceled()) {
-                                cancelled = true
-                                runCatching { process.destroyForcibly() }
-                                break
-                            }
-                            val line = reader.readLine() ?: break
-                            synchronized(lines) {
-                                lines.addLast(line)
-                                while (lines.size > keepLastLines) {
-                                    lines.removeFirst()
-                                    dropped++
-                                }
-                            }
-                            onLine(line)
+            }
+
+            try {
+                withContext(Dispatchers.IO) {
+                    val reader = BufferedReader(InputStreamReader(process.inputStream), 64 * 1024)
+                    while (true) {
+                        if (isCanceled() && !cancelled) {
+                            cancelled = true
+                            runCatching { process.destroyForcibly() }
                         }
+                        val line = reader.readLine() ?: break
+                        synchronized(lines) {
+                            lines.addLast(line)
+                            while (lines.size > keepLastLines) {
+                                lines.removeFirst()
+                                dropped++
+                            }
+                        }
+                        onLine(line)
                     }
-                    // 进程此时要么已经退出，要么被看门狗/取消杀掉
-                    runCatching { process.waitFor() }
-                } finally {
-                    watchdog?.cancel()
                 }
+                // 进程此时要么已经退出，要么被看门狗/取消杀掉
+                runCatching { process.waitFor() }
+            } finally {
+                watchdog?.cancel()
+                cancelWatcher.cancel()
             }
         } catch (cancelledException: CancellationException) {
             runCatching { process.destroyForcibly() }

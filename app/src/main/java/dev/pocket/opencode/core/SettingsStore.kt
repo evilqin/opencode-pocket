@@ -16,7 +16,10 @@ import org.json.JSONObject
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * 全部用户设置。用一份 JSON 存进 DataStore，加字段时天然向后兼容（缺字段用默认值）。
+ * 全部用户设置。
+ *
+ * 编解码（含默认值与向后兼容）在 [SettingsCodec] 里，并有单元测试锁着；
+ * 加字段时记得两处都补：这里的 data class + Codec 的 encode/decode。
  */
 data class AppSettings(
     /** 镜像源（id 见 [Mirrors]）。 */
@@ -29,15 +32,23 @@ data class AppSettings(
     val port: Int = 4096,
     val autoStart: Boolean = true,
 
+    /** 本机 HTTP 服务的口令（自动生成；同机其它 App 也能访问 127.0.0.1，所以默认必须有）。 */
+    val serverPassword: String = "",
+
     /** 低内存模式：关掉文件监视、关闭 LSP 自动下载，适合 4GB 以下机型。 */
     val lowMemory: Boolean = false,
     val disableWatcher: Boolean = false,
     val snapshot: Boolean = true,
     val share: String = "disabled",
 
-    /** 权限策略：allow / ask / deny。 */
-    val permissionEdit: String = "allow",
-    val permissionBash: String = "allow",
+    /**
+     * 权限策略：allow / ask / deny。
+     *
+     * 默认是 ask 而不是 allow：容器里的 agent 是「读外部内容 → 执行命令」的模型，
+     * 一个恶意仓库的 README 就可能诱导它去删文件或提权；改文件与执行命令都应该先问一句。
+     */
+    val permissionEdit: String = "ask",
+    val permissionBash: String = "ask",
 
     /** 兼容模式：给 proot 加 PROOT_NO_SECCOMP（个别内核上更稳）。 */
     val compatMode: Boolean = false,
@@ -49,10 +60,18 @@ data class AppSettings(
     val deviceShell: Boolean = false,
     val deviceShellPort: Int = 3090,
     val deviceShellToken: String = "",
+    /** 危险命令防护（rm -rf /、pm uninstall、dd 写块设备…），默认开启。 */
+    val deviceShellGuard: Boolean = true,
 
     /** 工作区：手机上的真实目录，会挂进容器 /root/workspace。 */
     val workspace: String = "/sdcard/OpenCode",
     val useExternalWorkspace: Boolean = true,
+
+    /**
+     * 是否把整个共享存储（/sdcard）也挂进容器。
+     * 默认关闭：容器里的 agent 只需要看到你选的工作区，不该顺带看到相册、聊天记录导出等。
+     */
+    val exposeSdcard: Boolean = false,
 
     /** Provider API Key（写进容器里的 opencode.json）。 */
     val providerKeys: Map<String, String> = emptyMap(),
@@ -67,6 +86,9 @@ data class AppSettings(
 
     /** 是否已经弹过一次通知权限（避免每次冷启动都打扰用户）。 */
     val notificationAsked: Boolean = false,
+
+    /** 开机后自动把服务拉起来（默认关闭；Android 12+ 对后台启动前台服务有额外限制）。 */
+    val autoStartOnBoot: Boolean = false,
 )
 
 class SettingsStore(private val context: Context) {
@@ -81,88 +103,36 @@ class SettingsStore(private val context: Context) {
         _settings.value = store.data.map { parse(it[key]) }.first()
     }
 
-    suspend fun snapshot(): AppSettings {
-        val current = store.data.first()[key]
-        return parse(current)
-    }
+    suspend fun snapshot(): AppSettings = parse(store.data.first()[key])
 
     suspend fun update(transform: (AppSettings) -> AppSettings) {
         var updated = AppSettings()
         store.edit { prefs ->
             updated = transform(parse(prefs[key]))
-            prefs[key] = encode(updated)
+            prefs[key] = SettingsCodec.encode(updated)
         }
         _settings.value = updated
     }
 
-    private fun parse(raw: String?): AppSettings {
-        if (raw.isNullOrBlank()) return AppSettings()
-        return try {
-            val json = JSONObject(raw)
-            val defaults = AppSettings()
-            AppSettings(
-                ubuntuMirror = json.optString("ubuntuMirror", defaults.ubuntuMirror),
-                aptMirror = json.optString("aptMirror", defaults.aptMirror),
-                nodeMirror = json.optString("nodeMirror", defaults.nodeMirror),
-                npmMirror = json.optString("npmMirror", defaults.npmMirror),
-                port = json.optInt("port", defaults.port).coerceIn(1024, 65535),
-                autoStart = json.optBoolean("autoStart", defaults.autoStart),
-                lowMemory = json.optBoolean("lowMemory", defaults.lowMemory),
-                disableWatcher = json.optBoolean("disableWatcher", defaults.disableWatcher),
-                snapshot = json.optBoolean("snapshot", defaults.snapshot),
-                share = json.optString("share", defaults.share),
-                permissionEdit = json.optString("permissionEdit", defaults.permissionEdit),
-                permissionBash = json.optString("permissionBash", defaults.permissionBash),
-                compatMode = json.optBoolean("compatMode", defaults.compatMode),
-                installNode = json.optBoolean("installNode", defaults.installNode),
-                deviceShell = json.optBoolean("deviceShell", defaults.deviceShell),
-                deviceShellPort = json.optInt("deviceShellPort", defaults.deviceShellPort).coerceIn(1024, 65535),
-                deviceShellToken = json.optString("deviceShellToken", defaults.deviceShellToken),
-                workspace = json.optString("workspace", defaults.workspace),
-                useExternalWorkspace = json.optBoolean("useExternalWorkspace", defaults.useExternalWorkspace),
-                providerKeys = json.optJSONObject("providerKeys").toStringMap(),
-                providerBaseUrls = json.optJSONObject("providerBaseUrls").toStringMap(),
-                defaultModel = json.optString("defaultModel", defaults.defaultModel),
-                smallModel = json.optString("smallModel", defaults.smallModel),
-                themeMode = json.optString("themeMode", defaults.themeMode),
-                dynamicColor = json.optBoolean("dynamicColor", defaults.dynamicColor),
-                notificationAsked = json.optBoolean("notificationAsked", defaults.notificationAsked),
-            )
-        } catch (_: Exception) {
-            AppSettings()
+    /**
+     * 保证本机 HTTP 服务有口令（首次调用时随机生成）。
+     *
+     * 为什么必须有：Android 的 127.0.0.1 对**同机所有 App** 开放，
+     * opencode 服务若不带口令，任何 App 都能驱动我们的 agent。
+     */
+    suspend fun ensureServerPassword(): String {
+        val existing = snapshot().serverPassword
+        if (existing.length >= 16) return existing
+        val generated = java.security.SecureRandom().let { random ->
+            val bytes = ByteArray(24)
+            random.nextBytes(bytes)
+            bytes.joinToString("") { "%02x".format(it) }
         }
+        update { it.copy(serverPassword = generated) }
+        return generated
     }
 
-    private fun encode(value: AppSettings): String {
-        val json = JSONObject()
-        json.put("ubuntuMirror", value.ubuntuMirror)
-        json.put("aptMirror", value.aptMirror)
-        json.put("nodeMirror", value.nodeMirror)
-        json.put("npmMirror", value.npmMirror)
-        json.put("port", value.port)
-        json.put("autoStart", value.autoStart)
-        json.put("lowMemory", value.lowMemory)
-        json.put("disableWatcher", value.disableWatcher)
-        json.put("snapshot", value.snapshot)
-        json.put("share", value.share)
-        json.put("permissionEdit", value.permissionEdit)
-        json.put("permissionBash", value.permissionBash)
-        json.put("compatMode", value.compatMode)
-        json.put("installNode", value.installNode)
-        json.put("deviceShell", value.deviceShell)
-        json.put("deviceShellPort", value.deviceShellPort)
-        json.put("deviceShellToken", value.deviceShellToken)
-        json.put("workspace", value.workspace)
-        json.put("useExternalWorkspace", value.useExternalWorkspace)
-        json.put("providerKeys", JSONObject(value.providerKeys as Map<*, *>))
-        json.put("providerBaseUrls", JSONObject(value.providerBaseUrls as Map<*, *>))
-        json.put("defaultModel", value.defaultModel)
-        json.put("smallModel", value.smallModel)
-        json.put("themeMode", value.themeMode)
-        json.put("dynamicColor", value.dynamicColor)
-        json.put("notificationAsked", value.notificationAsked)
-        return json.toString()
-    }
+    private fun parse(raw: String?): AppSettings = SettingsCodec.decode(raw)
 }
 
 internal fun JSONObject?.toStringMap(): Map<String, String> {

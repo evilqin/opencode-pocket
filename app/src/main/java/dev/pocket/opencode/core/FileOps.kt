@@ -11,14 +11,70 @@ import java.io.IOException
  * 为什么要单独放着几行：Ubuntu rootfs 里有 `var/run -> /run`、`/bin -> usr/bin`
  * 这类链接，Kotlin 标准库的 `deleteRecursively()` / `walkTopDown()` 都会**跟随**符号链接，
  * 于是「删掉容器目录」可能跑到宿主机的 /run、/etc 上去，统计体积也会跑到树外甚至死循环。
- * 这里一律用 lstat 判断，绝不跟随。
+ * 这里一律用「不跟随链接」的判断（java.nio 的 isSymbolicLink 在 JVM 单测里也能跑）。
  */
 object FileOps {
 
-    private fun isSymlink(file: File): Boolean = try {
-        OsConstants.S_ISLNK(Os.lstat(file.absolutePath).st_mode)
+    fun isSymlink(file: File): Boolean = try {
+        java.nio.file.Files.isSymbolicLink(java.nio.file.Paths.get(file.absolutePath))
     } catch (_: Exception) {
         false
+    }
+
+    /**
+     * 写文件/建目录前调用：如果这个路径当前是个符号链接，先删掉它。
+     *
+     * 否则「tarball 里先放一个指向树外的软链、再放同名文件」就能把内容写到树外
+     * （软链的父目录检查挡不住这种写法）。
+     */
+    fun clearIfSymlink(file: File): Boolean {
+        if (!isSymlink(file)) return false
+        return file.delete()
+    }
+
+    /**
+     * 交换目录：把 [newDir] 换到 [target]，旧目录改名为 `<target>.old` 保留。
+     *
+     * @return 备份目录（可能不存在），调用方在自检通过后调用 [finishSwap] 删除，
+     *         失败时调用 [rollbackSwap] 换回来。
+     */
+    fun beginSwap(newDir: File, target: File): File {
+        val backup = File(target.parentFile, target.name + ".old")
+        deleteTree(backup)
+        if (target.exists() || isSymlink(target)) {
+            if (!target.renameTo(backup)) {
+                // 换名失败就退化成直接删（至少保证最终状态正确）
+                deleteTree(target)
+            }
+        }
+        if (!newDir.renameTo(target)) {
+            // 换过去失败：尽量把旧环境换回来再报错
+            if (backup.exists()) backup.renameTo(target)
+            throw IOException("无法把 ${newDir.name} 换成 ${target.name}")
+        }
+        return backup
+    }
+
+    /** 自检通过：丢掉旧环境。 */
+    fun finishSwap(backup: File) {
+        deleteTree(backup)
+    }
+
+    /** 自检失败：把旧环境换回来，新环境删掉。 */
+    fun rollbackSwap(backup: File, target: File) {
+        if (!backup.exists()) {
+            deleteTree(target)
+            return
+        }
+        deleteTree(target)
+        if (!backup.renameTo(target)) {
+            throw IOException("回滚失败：无法把 ${backup.name} 换回 ${target.name}")
+        }
+    }
+
+    /** 兼容旧调用：交换并立即丢弃备份。 */
+    fun replaceDirectory(newDir: File, target: File) {
+        finishSwap(beginSwap(newDir, target))
     }
 
     /** 递归删除，不跟随符号链接（链接本身会被 unlink）。 */
@@ -104,18 +160,4 @@ object FileOps {
     }
 
     /** 原子替换目录：先把新内容放 ".new"，成功后再换上去，避免中途失败留下半个系统。 */
-    fun replaceDirectory(newDir: File, target: File) {
-        val backup = File(target.parentFile, target.name + ".old")
-        deleteTree(backup)
-        if (target.exists() || isSymlink(target)) {
-            if (!target.renameTo(backup)) {
-                // 换名失败就退化成直接删（至少保证最终状态正确）
-                deleteTree(target)
-            }
-        }
-        if (!newDir.renameTo(target)) {
-            throw IOException("无法把 ${newDir.name} 换成 ${target.name}")
-        }
-        deleteTree(backup)
-    }
 }

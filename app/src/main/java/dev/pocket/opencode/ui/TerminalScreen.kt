@@ -131,10 +131,14 @@ private fun CommandRunner(engine: PocketEngine) {
         busy = true
         scope.launch {
             try {
-                val wrapped = "cd '$cwd' 2>/dev/null || cd /root; $trimmed\nprintf '\\n__POCKET_PWD__%s\\n' \"\$PWD\""
+                // cwd 用单引号包住并转义（目录名里有 ' 时也不会串命令）；
+                // PWD 标记带随机串，避免命令输出伪造标记来欺骗界面
+                val quotedCwd = cwd.replace("'", "'\\''")
+                val marker = "__POCKET_PWD_${java.util.UUID.randomUUID().toString().take(8)}__"
+                val wrapped = "cd -- '$quotedCwd' 2>/dev/null || cd /root; $trimmed\nprintf '\\n$marker%s\\n' \"\$PWD\""
                 engine.shell.run(wrapped, settings, timeoutMs = 600_000) { line ->
-                    if (line.startsWith("__POCKET_PWD__")) {
-                        cwd = line.removePrefix("__POCKET_PWD__").trim()
+                    if (line.startsWith(marker)) {
+                        cwd = line.removePrefix(marker).trim()
                     } else if (line.isNotEmpty()) {
                         lines.add(TermLine.Output(line))
                         // 长输出命令（cat/find 之类）运行期间就要裁剪，否则内存线性增长

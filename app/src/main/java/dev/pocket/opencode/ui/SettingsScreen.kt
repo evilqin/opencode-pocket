@@ -83,6 +83,7 @@ fun SettingsScreen(engine: PocketEngine) {
     val bridge by engine.deviceShell.status.collectAsStateWithLifecycle()
     var dialog by remember { mutableStateOf<SettingsDialog?>(null) }
     var bridgeTest by remember { mutableStateOf<String?>(null) }
+    var auditTail by remember { mutableStateOf<List<String>?>(null) }
 
     // Shizuku 的授权结果回调：授权完成后立刻把桥拉起来
     DisposableEffect(Unit) {
@@ -216,6 +217,42 @@ fun SettingsScreen(engine: PocketEngine) {
                         },
                     )
                     SettingRow(
+                        icon = PocketIcons.Bolt,
+                        title = "开机自动启动",
+                        subtitle = "开机后按设置恢复服务（部分 ROM 限制后台启动，失败不影响手动启动）",
+                        trailing = {
+                            Switch(
+                                checked = settings.autoStartOnBoot,
+                                onCheckedChange = { value ->
+                                    scope.launch { engine.settings.update { it.copy(autoStartOnBoot = value) } }
+                                },
+                            )
+                        },
+                    )
+                    SettingRow(
+                        icon = PocketIcons.Shield,
+                        title = "服务口令",
+                        subtitle = "127.0.0.1 对同机所有 App 开放，口令是唯一的防线（启动服务时自动带上）",
+                        value = if (settings.serverPassword.isBlank()) "未生成" else maskKey(settings.serverPassword),
+                        onClick = {
+                            if (settings.serverPassword.isNotBlank()) {
+                                copyToClipboard(context, settings.serverPassword, "口令已复制")
+                            }
+                        },
+                    )
+                    SettingRow(
+                        icon = Icons.Filled.Refresh,
+                        title = "重新生成服务口令",
+                        subtitle = "生成后需要重启服务才生效",
+                        onClick = {
+                            scope.launch {
+                                engine.settings.update { it.copy(serverPassword = "") }
+                                engine.settings.ensureServerPassword()
+                                if (server.running) engine.startServer(restart = true)
+                            }
+                        },
+                    )
+                    SettingRow(
                         icon = PocketIcons.Chip,
                         title = "低内存模式",
                         subtitle = "关掉文件监视与 LSP 自动下载，4GB 以下机型更稳",
@@ -307,6 +344,19 @@ fun SettingsScreen(engine: PocketEngine) {
                                 checked = settings.useExternalWorkspace,
                                 onCheckedChange = { value ->
                                     scope.launch { engine.settings.update { it.copy(useExternalWorkspace = value) } }
+                                },
+                            )
+                        },
+                    )
+                    SettingRow(
+                        icon = PocketIcons.Storage,
+                        title = "把整个共享存储挂进容器",
+                        subtitle = "默认关闭：容器里只能看到你选的工作区，看不到相册/下载/其它 App 的导出目录",
+                        trailing = {
+                            Switch(
+                                checked = settings.exposeSdcard,
+                                onCheckedChange = { value ->
+                                    scope.launch { engine.settings.update { it.copy(exposeSdcard = value) } }
                                 },
                             )
                         },
@@ -427,6 +477,36 @@ fun SettingsScreen(engine: PocketEngine) {
                                 subtitle = "改了端口或令牌之后点一下",
                                 onClick = { engine.deviceShell.sync() },
                             )
+                            SettingRow(
+                                icon = PocketIcons.Shield,
+                                title = "危险命令防护",
+                                subtitle = "拦截 rm -rf /、pm uninstall、dd 写块设备等 ${dev.pocket.opencode.core.CommandGuard.ruleCount} 类命令",
+                                trailing = {
+                                    Switch(
+                                        checked = settings.deviceShellGuard,
+                                        onCheckedChange = { value ->
+                                            scope.launch {
+                                                engine.settings.update { it.copy(deviceShellGuard = value) }
+                                                engine.deviceShell.syncNow()
+                                            }
+                                        },
+                                    )
+                                },
+                            )
+                            SettingRow(
+                                icon = PocketIcons.Terminal,
+                                title = "最近执行记录",
+                                subtitle = "桥的每次调用（含被拦下的）都会记一笔",
+                                onClick = {
+                                    scope.launch { auditTail = engine.deviceShell.auditTail(40) }
+                                },
+                            )
+                            SettingRow(
+                                icon = Icons.Filled.Refresh,
+                                title = "更换访问令牌",
+                                subtitle = "旧令牌立即失效，容器里的 dexec 配置会同步刷新",
+                                onClick = { engine.deviceShell.rotateToken() },
+                            )
                         }
                     }
                 }
@@ -490,21 +570,24 @@ fun SettingsScreen(engine: PocketEngine) {
                     SettingRow(
                         icon = PocketIcons.Terminal,
                         title = "导出运行日志",
-                        subtitle = "把服务与安装日志发出去排查问题",
+                        subtitle = "会自动打码密钥/口令；日志里仍可能包含你的代码片段与对话内容",
                         onClick = {
                             scope.launch {
-                                // 日志可能几十 MB，读写在 IO 线程做，避免 ANR
+                                // 日志可能几十 MB，读写在 IO 线程做；同时做脱敏（密钥/令牌/口令）
                                 val file = withContext(Dispatchers.IO) {
                                     runCatching {
+                                        val raw = buildString {
+                                            appendLine("== install.log ==")
+                                            appendLine(engine.paths.installLog.takeIf { it.isFile }?.readText().orEmpty())
+                                            appendLine("== server.log ==")
+                                            appendLine(engine.paths.serverLog.takeIf { it.isFile }?.readText().orEmpty())
+                                        }
+                                        val secrets = listOfNotNull(
+                                            settings.serverPassword.takeIf { it.isNotBlank() },
+                                            settings.deviceShellToken.takeIf { it.isNotBlank() },
+                                        ) + settings.providerKeys.values
                                         val target = engine.paths.exportDir.resolve("opencode-pocket-logs.txt")
-                                        target.writeText(
-                                            buildString {
-                                                appendLine("== install.log ==")
-                                                appendLine(engine.paths.installLog.takeIf { it.isFile }?.readText().orEmpty())
-                                                appendLine("== server.log ==")
-                                                appendLine(engine.paths.serverLog.takeIf { it.isFile }?.readText().orEmpty())
-                                            },
-                                        )
+                                        target.writeText(dev.pocket.opencode.util.LogRedactor.redact(raw, secrets))
                                         target
                                     }.getOrNull()
                                 }
@@ -669,6 +752,7 @@ fun SettingsScreen(engine: PocketEngine) {
 
         SettingsDialog.Workspace -> {
             var path by remember { mutableStateOf(settings.workspace) }
+            var problem by remember { mutableStateOf<String?>(null) }
             AlertDialog(
                 onDismissRequest = { dialog = null },
                 title = { Text("工作区路径") },
@@ -676,9 +760,20 @@ fun SettingsScreen(engine: PocketEngine) {
                     Column {
                         OutlinedTextField(
                             value = path,
-                            onValueChange = { path = it },
+                            onValueChange = {
+                                path = it
+                                problem = dev.pocket.opencode.core.WorkspacePolicy.validate(it)
+                            },
                             singleLine = true,
+                            isError = problem != null,
                             modifier = Modifier.fillMaxWidth(),
+                            supportingText = {
+                                Text(
+                                    problem ?: "容器里始终显示为 /root/workspace",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (problem != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            },
                         )
                         Spacer(Modifier.height(10.dp))
                         Row(
@@ -688,24 +783,34 @@ fun SettingsScreen(engine: PocketEngine) {
                             listOf("/sdcard/OpenCode", "/sdcard/Download", "/sdcard/Documents").forEach { preset ->
                                 FilterChip(
                                     selected = path == preset,
-                                    onClick = { path = preset },
+                                    onClick = {
+                                        path = preset
+                                        problem = null
+                                    },
                                     label = { Text(preset.replace("/sdcard/", ""), style = MaterialTheme.typography.labelSmall) },
                                 )
                             }
                         }
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            "目录不存在会自动创建。容器里始终显示为 /root/workspace。",
+                            "只支持共享存储里的具体目录（/sdcard/…）；整个 /sdcard 或 /data 这种目录不允许当工作区。",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        scope.launch { engine.settings.update { it.copy(workspace = path.trim()) } }
-                        dialog = null
-                    }) { Text("保存") }
+                    TextButton(
+                        onClick = {
+                            val checked = dev.pocket.opencode.core.WorkspacePolicy.validate(path)
+                            if (checked != null) {
+                                problem = checked
+                            } else {
+                                scope.launch { engine.settings.update { it.copy(workspace = path.trim().trimEnd('/')) } }
+                                dialog = null
+                            }
+                        },
+                    ) { Text("保存") }
                 },
                 dismissButton = { TextButton(onClick = { dialog = null }) { Text("取消") } },
             )
@@ -789,6 +894,30 @@ fun SettingsScreen(engine: PocketEngine) {
                 }) { Text("复制") }
             },
             dismissButton = { TextButton(onClick = { bridgeTest = null }) { Text("关闭") } },
+        )
+    }
+
+    auditTail?.let { lines ->
+        AlertDialog(
+            onDismissRequest = { auditTail = null },
+            title = { Text("设备 Shell 最近执行记录") },
+            text = {
+                if (lines.isEmpty()) {
+                    Text("还没有记录", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Text(
+                        lines.joinToString("\n"),
+                        style = dev.pocket.opencode.ui.theme.CodeTextStyle,
+                        modifier = Modifier.heightIn(max = 360.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { copyToClipboard(context, lines.joinToString("\n"), "记录已复制") }) {
+                    Text("复制")
+                }
+            },
+            dismissButton = { TextButton(onClick = { auditTail = null }) { Text("关闭") } },
         )
     }
 }
