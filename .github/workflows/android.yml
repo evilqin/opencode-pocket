@@ -21,7 +21,6 @@ jobs:
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -151,9 +150,30 @@ jobs:
           path: artifacts/*.apk
           if-no-files-found: error
 
+  # 容器配方冒烟：在 Linux/x86_64 上用 proot 把 rootfs / 脚本 / Node / opencode / 服务 API 全跑一遍。
+  # 与 build 并行；tag 发布时它也是发布闸门（release needs 两个 job）。
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 运行容器配方冒烟测试
+        run: bash tools/ci-runtime-smoke.sh
+
+      - name: 冒烟失败时打印关键日志
+        if: failure()
+        run: |
+          for f in .smoke/serve.log .smoke/web.log; do
+            if [ -f "$f" ]; then
+              echo "==== $f ===="
+              tail -n 60 "$f"
+            fi
+          done
+
   release:
-    needs: build
-    # 只在推送 v* 标签时发布，且必须先构建成功
+    needs: [build, smoke]
+    # 只在推送 v* 标签时发布，且必须先构建与冒烟都成功
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
