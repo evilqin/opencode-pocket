@@ -484,8 +484,17 @@ class Installer(
         file.delete()
 
         setProgress(0.95f, "自检…")
-        val check = shell.run("node -v && npm -v", config, timeoutMs = 120_000, isCanceled = { cancelRequested })
+        val check = shell.run("node -v", config, timeoutMs = 120_000, isCanceled = { cancelRequested })
         if (!check.success) throw IllegalStateException("Node 自检失败：${check.text.takeLast(300)}")
+
+        // npm 是 Node 包自带的，opencode 本体并不依赖它。个别 Node 大版本在 proot 下的
+        // 模块解析会失败（CI 里 Node 24 的 npm 报 Cannot find module …/walk-up-path/…），
+        // 这不该让整个安装中断：只记一条日志，用户真要用 npm 时可以在终端里看到原因。
+        val npm = shell.run("npm -v", config, timeoutMs = 120_000, isCanceled = { cancelRequested })
+        if (!npm.success) {
+            log("注意：npm 自检失败（不影响 opencode 本体）：${npm.text.lineSequence().firstOrNull()?.trim().orEmpty()}")
+        }
+
         saveVersion("node", artifact.version)
         return "Node ${check.lines.firstOrNull()?.trim() ?: artifact.version}"
     }

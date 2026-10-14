@@ -225,7 +225,12 @@ else
   log "⚠️ 容器里缺 npm 的 bundled 依赖（walk-up-path），先记下来"
 fi
 if ! run 'npm -v'; then
-  log "⚠️ npm 在容器里跑不起来（opencode 自身不依赖 npm；App 的 Node 步骤会验证它，需要单独看）"
+  log "⚠️ npm 在容器里跑不起来（不影响 opencode：它是 Bun 二进制；App 的 Node 步骤现在也只把它当告警）"
+  log "npm 诊断："
+  run 'wc -c < /usr/local/lib/node_modules/npm/node_modules/walk-up-path/dist/commonjs/index.js 2>&1'
+  run 'head -c 60 /usr/local/lib/node_modules/npm/node_modules/walk-up-path/dist/commonjs/index.js 2>&1; echo'
+  run 'node -e "require(\"/usr/local/lib/node_modules/npm/node_modules/walk-up-path/dist/commonjs/index.js\"); console.log(\"按路径 require 成功\")" 2>&1 | head -n 3'
+  run 'node -e "console.log(require.resolve(\"walk-up-path\", { paths: [\"/usr/local/lib/node_modules/npm/lib\"] }))" 2>&1 | head -n 3'
 fi
 mark "Node 就绪"
 
