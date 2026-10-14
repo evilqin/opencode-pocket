@@ -20,6 +20,8 @@ ROOTFS="$WORK/rootfs"
 MIRROR_UBUNTU="${MIRROR_UBUNTU:-https://mirrors.tuna.tsinghua.edu.cn/ubuntu-cdimage/ubuntu-base/releases/24.04/release}"
 MIRROR_NODE="${MIRROR_NODE:-https://npmmirror.com/mirrors/node}"
 MIRROR_NPM="${MIRROR_NPM:-https://registry.npmmirror.com}"
+# apt 源：CI 上用官方源（快且稳）；想验证国内镜像时用 APT_MIRROR=… 覆盖
+APT_MIRROR="${APT_MIRROR:-https://archive.ubuntu.com/ubuntu}"
 PORT_SERVE="${PORT_SERVE:-4111}"
 PORT_WEB="${PORT_WEB:-4112}"
 PASSWORD="${PASSWORD:-smoke-test-password}"
@@ -79,6 +81,12 @@ for bind in /dev /proc /sys /dev/urandom:/dev/random; do
 done
 
 printf 'nameserver 223.5.5.5\nnameserver 119.29.29.29\n' > "$ROOTFS/etc/resolv.conf"
+# 更贴近 App 的做法（它从 ConnectivityManager 读 DNS 写进 rootfs）：优先用宿主 DNS，再补公共 DNS
+{
+  grep -E '^nameserver' /etc/resolv.conf || true
+  echo "nameserver 223.5.5.5"
+  echo "nameserver 1.1.1.1"
+} > "$ROOTFS/etc/resolv.conf"
 
 # 与 Proot.guestEnv() 一致：env -i + 固定变量，调用方再追加额外变量与命令
 PROOT_COMMON=(
@@ -108,6 +116,33 @@ run "grep -q '^registry=$MIRROR_NPM' /root/.npmrc && echo npmrc-ok"
 run 'grep -q "alias oc=" /etc/profile.d/90-pocket.sh && echo profile-ok'
 run 'echo "$LANG" | grep -q C.UTF-8 && echo locale-ok'
 
+# ---------------------------------------------------------------- apt / dpkg（真机高风险环节）
+
+log "配置 apt 源：用仓库里的 setup-apt.sh（与安装流水线同一份，占位符替换方式一致）"
+CODENAME=$(run '. /etc/os-release && echo "$VERSION_CODENAME"' | tail -n1)
+[ -n "$CODENAME" ] || fail "拿不到发行版代号"
+log "发行版代号 $CODENAME，apt 源 $APT_MIRROR（rootfs 里有没有 keyring 也在这步验证）"
+sed -e "s|@APT_MIRROR@|$APT_MIRROR|" -e "s|@DISTRO@|$CODENAME|" \
+  app/src/main/assets/scripts/setup-apt.sh > "$WORK/setup-apt.sh"
+install -D -m 0755 "$WORK/setup-apt.sh" "$ROOTFS/root/.pocket/setup-apt.sh"
+install -D -m 0755 app/src/main/assets/scripts/install-tools.sh "$ROOTFS/root/.pocket/install-tools.sh"
+
+APT_LOG="$WORK/apt.log"
+run 'bash /root/.pocket/setup-apt.sh' > "$APT_LOG" 2>&1 || { tail -n 25 "$APT_LOG"; fail "setup-apt.sh 失败（apt 源或 keyring 有问题）"; }
+grep -q POCKET_APT_READY "$APT_LOG" || { tail -n 25 "$APT_LOG"; fail "setup-apt.sh 没有输出 POCKET_APT_READY"; }
+run "grep -q '$APT_MIRROR' /etc/apt/sources.list && echo sources-ok"
+log "apt 源就绪（含 apt-get update）"
+
+log "安装容器基础工具：apt + dpkg 在 proot 假 root 下能不能真的用（真机最怕这一步）"
+TOOLS_LOG="$WORK/tools.log"
+run 'bash /root/.pocket/install-tools.sh' > "$TOOLS_LOG" 2>&1 || { tail -n 30 "$TOOLS_LOG"; fail "install-tools.sh 失败"; }
+grep -q POCKET_TOOLS_READY "$TOOLS_LOG" || { tail -n 30 "$TOOLS_LOG"; fail "install-tools.sh 没有输出 POCKET_TOOLS_READY"; }
+run 'git --version && curl --version | head -n1 && rg --version | head -n1'
+
+log "验证 git 在容器里能提交（opencode 的快照/回滚依赖它）"
+run 'cd /root/workspace && git init -q . && git config user.email pocket@local && git config user.name pocket && echo hi > smoke.txt && git add smoke.txt && git commit -qm "smoke" && git log --oneline -1' \
+  || fail "git 在容器里无法提交"
+
 # ---------------------------------------------------------------- Node（走镜像直取）
 
 if [ ! -x "$ROOTFS/usr/local/bin/node" ]; then
@@ -136,6 +171,15 @@ if [ ! -x "$ROOTFS/usr/local/lib/opencode/bin/opencode" ]; then
   OC_VERSION=$(curl -fsSL "$MIRROR_NPM/opencode-ai/latest" | jq -r '.version')
   [ -n "$OC_VERSION" ] && [ "$OC_VERSION" != "null" ] || fail "拿不到 opencode 版本号"
   curl -fsSL "$MIRROR_NPM/opencode-linux-x64/-/opencode-linux-x64-$OC_VERSION.tgz" -o "$WORK/opencode.tgz"
+  # 与 App 的校验方式一致：registry 的版本元数据里有 dist.shasum
+  META_SHA1=$(curl -fsSL "$MIRROR_NPM/opencode-linux-x64/$OC_VERSION" | jq -r '.dist.shasum // empty')
+  PKG_SHA1=$(sha1sum "$WORK/opencode.tgz" | awk '{print $1}')
+  if [ -n "$META_SHA1" ]; then
+    [ "$META_SHA1" = "$PKG_SHA1" ] || fail "opencode 包 sha1 与 registry 元数据不一致（App 用的就是这条校验）"
+    log "opencode 包 sha1 校验通过（registry 元数据可用，App 的校验路径成立）"
+  else
+    printf '[smoke] 注意：registry 元数据里没有 dist.shasum，App 会跳过该包校验（记录一下）\n'
+  fi
   rm -rf "$WORK/oc-extract"
   mkdir -p "$WORK/oc-extract" "$ROOTFS/usr/local/lib/opencode/bin"
   tar -xzf "$WORK/opencode.tgz" -C "$WORK/oc-extract" package/bin/opencode
