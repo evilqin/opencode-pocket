@@ -42,5 +42,13 @@
       "size": 14432,
       "sha256": "84475798e07c8174dbbfaec70a827fdb02f19ffa69a589380c13e7507fd0e731"
     }
-  ]
+  ],
+  "prootOptions": {
+    "--rootfs": true,
+    "--cwd": true,
+    "--bind": true,
+    "--kill-on-exit": true,
+    "--link2symlink": true,
+    "--sysvipc": true
+  }
 }

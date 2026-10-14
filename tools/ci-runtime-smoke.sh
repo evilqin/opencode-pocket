@@ -58,9 +58,23 @@ fi
 
 # ---------------------------------------------------------------- 与 App 一致的 proot 配方
 
-PROOT_ARGS=(-L --kill-on-exit -0 "--rootfs=$ROOTFS" --cwd=/root)
+# 选项名在 proot 的不同构建里并不一致（Ubuntu 24.04 的 5.1.0 不认 `-L`）。
+# App 侧只用长选项；这里再按本机 proot 的帮助文本做一次能力探测，
+# 缺哪个就跳过哪个并打警告（手机上用的是 Termux proot，支持全部）。
+PROOT_HELP=$(proot --help 2>&1 || true)
+PROOT_ARGS=(--rootfs="$ROOTFS" --cwd=/root)
+add_flag() {
+  if printf '%s' "$PROOT_HELP" | grep -q -- "$1"; then
+    PROOT_ARGS+=("$1")
+  else
+    printf '[smoke] 注意：本机 proot 不支持 %s，已跳过（Termux proot 支持）\n' "$1"
+  fi
+}
+add_flag --sysvipc
+add_flag --kill-on-exit
+PROOT_ARGS+=(-0)   # fake root：所有构建都支持
 for bind in /dev /proc /sys /dev/urandom:/dev/random; do
-  PROOT_ARGS+=(-b "$bind")
+  PROOT_ARGS+=(--bind "$bind")
 done
 
 printf 'nameserver 223.5.5.5\nnameserver 119.29.29.29\n' > "$ROOTFS/etc/resolv.conf"

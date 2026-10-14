@@ -87,16 +87,14 @@ class Proot(
         argv += paths.prootBin.absolutePath
         // 外部工作区在 FUSE 上：宿主侧硬链接本来就不支持，同样需要 link2symlink 模拟
         if (!hardlinkSupported() || workspace.external) {
-            argv += "--link2symlink"
+            argv += ProotArgs.LINK2SYMLINK
             val l2s = File(paths.rootfs, ".l2s").apply { mkdirs() }
-            argv += "-b"
-            argv += "${l2s.absolutePath}:${l2s.absolutePath}"
+            argv += ProotArgs.bind(l2s.absolutePath, l2s.absolutePath)
         }
-        argv += "-L"                    // SysV IPC 模拟
-        argv += "--kill-on-exit"        // proot 退出时带走整个容器进程树
-        argv += "-0"                    // fake root
-        argv += "--rootfs=${paths.rootfs.absolutePath}"
-        argv += "--cwd=$cwd"
+        argv += ProotArgs.extensionFlags()
+        argv += ProotArgs.FAKE_ROOT              // fake root
+        argv += ProotArgs.rootfs(paths.rootfs.absolutePath)
+        argv += ProotArgs.cwd(cwd)
 
         val binds = mutableListOf(
             "/dev" to "/dev",
@@ -122,13 +120,11 @@ class Proot(
 
         for ((host, guest) in binds) {
             if (!File(host).exists()) continue
-            argv += "-b"
-            argv += if (host == guest) host else "$host:$guest"
+            argv += ProotArgs.bind(host, guest)
         }
         for ((host, guest) in extraBinds) {
             if (!host.exists()) continue
-            argv += "-b"
-            argv += if (host.absolutePath == guest) host.absolutePath else "${host.absolutePath}:$guest"
+            argv += ProotArgs.bind(host.absolutePath, guest)
         }
         return argv
     }

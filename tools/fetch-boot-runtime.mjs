@@ -54,6 +54,32 @@ const ARTIFACTS = [
 const checkOnly = process.argv.includes("--check");
 
 /**
+ * App 侧真正依赖的 proot 长选项。
+ *
+ * 为什么要在 CI 里盯这些：不同构建的 proot 支持的名字不一样 —— Ubuntu 24.04 的
+ * proot 5.1.0 就不认 `-L`（SysV IPC 的短选项），只认 `--sysvipc` 的构建也存在。
+ * App 里必须写长选项，而这里保证「换成别的 proot 二进制时」CI 会先报错，
+ * 而不是等到手机上启动容器才发现参数不认识。
+ */
+const REQUIRED_PROOT_OPTIONS = [
+  "--rootfs",
+  "--cwd",
+  "--bind",
+  "--kill-on-exit",
+  "--link2symlink",
+  "--sysvipc",
+];
+
+/** 从 ELF 里扫出 option table 里的选项名（清单里记一份，便于人工审查）。 */
+function scanProotOptions(buffer) {
+  const text = buffer.toString("latin1");
+  const found = {};
+  for (const name of REQUIRED_PROOT_OPTIONS) found[name] = text.includes(name);
+  return found;
+}
+
+
+/**
  * 离线校验：拿仓库里提交的 boot-runtime.json 与 jniLibs 里的字节比对。
  *
  * 之前的实现是「先下载覆盖、再和自己比」，恒过 —— 等于没有把关；
@@ -78,6 +104,28 @@ function verifyAgainstManifest() {
     }
     log(`校验通过 ${name} (${item.size} 字节)`);
   }
+
+  // 内置运行时 → App 参数假设的一致性检查
+  const prootPath = path.join(OUT_DIR, "libproot.so");
+  const scan = scanProotOptions(fs.readFileSync(prootPath));
+  const missing = REQUIRED_PROOT_OPTIONS.filter((name) => !scan[name]);
+  if (missing.length > 0) {
+    throw new Error(
+      `内置 proot 缺少 App 依赖的选项：${missing.join(", ")}\n` +
+        `（App 的 Proot.kt 会直接传这些参数；换了 proot 版本就得同步改代码）`,
+    );
+  }
+  const recorded = manifest.prootOptions;
+  if (recorded) {
+    for (const name of REQUIRED_PROOT_OPTIONS) {
+      if (recorded[name] !== scan[name]) {
+        throw new Error(`boot-runtime.json 里的 prootOptions.${name} 与实际二进制不一致（${recorded[name]} != ${scan[name]}）`);
+      }
+    }
+  } else {
+    log("提示：boot-runtime.json 还没有 prootOptions 字段（下次生成时会写入）");
+  }
+  log(`proot 选项自检通过：${REQUIRED_PROOT_OPTIONS.join(" ")}`);
   log(`运行时身份：${(manifest.packages ?? []).map((p) => `${p.name}@${p.version}`).join(", ")}`);
 }
 
@@ -282,6 +330,9 @@ async function main() {
     manifest.files.push({ file: `jniLibs/arm64-v8a/${target}`, size: bytes.length, sha256: digest });
     log(`写入 ${target} (${bytes.length} 字节)`);
   }
+
+  // 记录 proot 支持的选项（App 侧参数依赖它；--check 会拿真实二进制复核）
+  manifest.prootOptions = scanProotOptions(fs.readFileSync(path.join(OUT_DIR, "libproot.so")));
 
   fs.writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + "\n");
   log("完成：内置运行时已就绪");
