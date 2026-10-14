@@ -28,6 +28,25 @@ import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
  */
 object TarExtract {
 
+    /**
+     * 用 java.nio.file 而不是 android.system.Os：
+     *   - 行为完全一致（Android API 26+ 支持 java.nio.file）；
+     *   - 在 JVM 单元测试里软链/硬链是**真实的**，能验证「先软链、再写同名文件」的逃逸防护。
+     */
+    private fun createSymlink(link: File, target: String) {
+        java.nio.file.Files.createSymbolicLink(
+            java.nio.file.Paths.get(link.absolutePath),
+            java.nio.file.Paths.get(target),
+        )
+    }
+
+    private fun createHardlink(link: File, existing: File) {
+        java.nio.file.Files.createLink(
+            java.nio.file.Paths.get(link.absolutePath),
+            java.nio.file.Paths.get(existing.absolutePath),
+        )
+    }
+
     data class Stats(
         var files: Long = 0,
         var bytes: Long = 0,
@@ -162,7 +181,7 @@ object TarExtract {
                 target.parentFile?.mkdirs()
                 target.delete()
                 try {
-                    Os.symlink(link, target.absolutePath)
+                    createSymlink(target, link)
                     stats.files++
                 } catch (_: Exception) {
                     stats.skippedLinks++
@@ -183,7 +202,7 @@ object TarExtract {
                 target.parentFile?.mkdirs()
                 target.delete()
                 try {
-                    Os.link(source.absolutePath, target.absolutePath)
+                    createHardlink(target, source)
                     stats.files++
                 } catch (_: Exception) {
                     try {
@@ -227,6 +246,24 @@ object TarExtract {
 
     private fun chmodQuiet(file: File, mode: Int) {
         if (mode <= 0) return
+        // Android 用 Os.chmod（支持任意权限位）；JVM 上没有对应 API，用 POSIX 权限近似并在失败时忽略
         runCatching { Os.chmod(file.absolutePath, mode) }
+            .recoverCatching {
+                val permissions = buildSet {
+                    if (mode and 0b100_000_000 != 0) add(java.nio.file.attribute.PosixFilePermission.OWNER_READ)
+                    if (mode and 0b010_000_000 != 0) add(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE)
+                    if (mode and 0b001_000_000 != 0) add(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE)
+                    if (mode and 0b000_100_000 != 0) add(java.nio.file.attribute.PosixFilePermission.GROUP_READ)
+                    if (mode and 0b000_010_000 != 0) add(java.nio.file.attribute.PosixFilePermission.GROUP_WRITE)
+                    if (mode and 0b000_001_000 != 0) add(java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE)
+                    if (mode and 0b000_000_100 != 0) add(java.nio.file.attribute.PosixFilePermission.OTHERS_READ)
+                    if (mode and 0b000_000_010 != 0) add(java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE)
+                    if (mode and 0b000_000_001 != 0) add(java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE)
+                }
+                java.nio.file.Files.setPosixFilePermissions(
+                    java.nio.file.Paths.get(file.absolutePath),
+                    permissions,
+                )
+            }
     }
 }

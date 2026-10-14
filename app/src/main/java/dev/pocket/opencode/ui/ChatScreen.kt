@@ -66,6 +66,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.pocket.opencode.core.PocketEngine
 import dev.pocket.opencode.core.ServerPhase
@@ -337,6 +339,12 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
     var selectedModel by mutableStateOf<Pair<String, String>?>(null)
     var selectedAgent by mutableStateOf<String?>(null)
 
+    /** 「本次改动」面板。 */
+    var showDiffs by mutableStateOf(false)
+    var diffs by mutableStateOf<List<dev.pocket.opencode.data.FileDiffInfo>>(emptyList())
+    var diffsLoading by mutableStateOf(false)
+    var diffsError by mutableStateOf<String?>(null)
+
     /** 事件流重连过，需要补拉一次历史。 */
     var pendingResync by mutableStateOf(false)
 
@@ -347,6 +355,21 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
             messages.clear()
             messages.addAll(merged)
         }
+    }
+
+    /**
+     * 拉「本次改动」列表（GET /session/:id/diff）。
+     * 服务端只给统计时（没有 before/after）界面会退化成"只看统计"，不会报错。
+     */
+    suspend fun loadDiff() {
+        diffsLoading = true
+        diffsError = null
+        try {
+            diffs = engine.api.sessionDiff(session.id)
+        } catch (exception: Exception) {
+            diffsError = exception.message
+        }
+        diffsLoading = false
     }
 
     suspend fun load() {
@@ -554,6 +577,11 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
         }
     }
 
+    // agent 干完活（busy 变 false）且改动面板开着：顺手刷一次改动列表
+    LaunchedEffect(chat.busy, chat.showDiffs) {
+        if (chat.showDiffs && !chat.busy) chat.loadDiff()
+    }
+
     LaunchedEffect(chat.messages.size, chat.permissions.size, chat.busy) {
         val total = chat.messages.size + chat.permissions.size + if (chat.busy) 1 else 0
         if (total > 0) listState.animateScrollToItem(total - 1)
@@ -585,6 +613,10 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                IconButton(onClick = {
+                    chat.showDiffs = true
+                    scope.launch { chat.loadDiff() }
+                }) { Icon(PocketIcons.Code, "本次改动") }
                 IconButton(onClick = { scope.launch { chat.load() } }) { Icon(Icons.Filled.Refresh, "重新加载") }
             }
         }
@@ -804,6 +836,21 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
             },
             dismissButton = { TextButton(onClick = { showRename = false }) { Text("取消") } },
         )
+    }
+
+    if (chat.showDiffs) {
+        Dialog(
+            onDismissRequest = { chat.showDiffs = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            DiffPanel(
+                diffs = chat.diffs,
+                loading = chat.diffsLoading,
+                error = chat.diffsError,
+                onReload = { scope.launch { chat.loadDiff() } },
+                onDismiss = { chat.showDiffs = false },
+            )
+        }
     }
 }
 

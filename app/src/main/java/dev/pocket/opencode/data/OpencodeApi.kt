@@ -198,6 +198,16 @@ class OpencodeApi(
 
     suspend fun config(): JSONObject = getJson("/config")
 
+    /**
+     * 本次会话产生的文件改动（GET /session/:id/diff）。
+     * 可选按 messageID 只看某个回合的改动。
+     */
+    suspend fun sessionDiff(sessionID: String, messageID: String? = null): List<FileDiffInfo> =
+        withContext(Dispatchers.IO) {
+            val query = messageID?.takeIf { it.isNotBlank() }?.let { "?messageID=$it" } ?: ""
+            Parsers.fileDiffs(getArray("/session/$sessionID/diff$query"))
+        }
+
     // ---------------------------------------------------------------- 事件流
 
     /**

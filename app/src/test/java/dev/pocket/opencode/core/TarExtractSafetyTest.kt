@@ -180,6 +180,88 @@ class TarExtractSafetyTest {
     }
 
     @Test
+    fun `先放软链再放同名文件不会写到树外`() {
+        val outside = temp.newFile("outside-target.txt").apply { writeText("must-not-change") }
+        val dest = temp.newFolder("dest-symlink-escape")
+        val escaping = File(dest, "escape.txt")
+        try {
+            java.nio.file.Files.createSymbolicLink(escaping.toPath(), outside.toPath())
+        } catch (_: Exception) {
+            // Windows 默认不允许普通用户建软链：跳过（CI 的 Linux runner 会真正跑到）
+            org.junit.Assume.assumeTrue("当前平台不支持创建软链，跳过该用例", false)
+        }
+        val tar = buildTar { out -> out.addFile("escape.txt", "PWNED") }
+        TarExtract.extract(tar, dest)
+
+        assertEquals("树外文件不能被改写", "must-not-change", outside.readText())
+        assertEquals("PWNED", File(dest, "escape.txt").readText())
+        assertFalse(
+            "同名位置应该被换成普通文件，而不是保留软链",
+            java.nio.file.Files.isSymbolicLink(File(dest, "escape.txt").toPath()),
+        )
+    }
+
+    @Test
+    fun `软链会被真实创建且可读`() {
+        val dest = temp.newFolder("dest-symlink-real")
+        val tar = buildTar { out ->
+            out.addFile("real.txt", "data-here")
+            out.addLink("link.txt", "real.txt", TarConstants.LF_SYMLINK)
+        }
+        TarExtract.extract(tar, dest)
+
+        val link = File(dest, "link.txt")
+        try {
+            org.junit.Assume.assumeTrue(
+                "当前平台不支持创建软链，跳过该用例",
+                java.nio.file.Files.isSymbolicLink(link.toPath()),
+            )
+        } catch (_: Exception) {
+            org.junit.Assume.assumeTrue("检查软链失败，跳过该用例", false)
+        }
+        assertTrue(java.nio.file.Files.isSymbolicLink(link.toPath()))
+        assertEquals("data-here", link.readText())
+    }
+
+    @Test
+    fun `硬链会指向同一个 inode（不支持时退化为拷贝）`() {
+        val dest = temp.newFolder("dest-hardlink-real")
+        val tar = buildTar { out ->
+            out.addFile("real.txt", "shared")
+            out.addLink("hard.txt", "real.txt", TarConstants.LF_LINK)
+        }
+        TarExtract.extract(tar, dest)
+
+        val real = File(dest, "real.txt")
+        val hard = File(dest, "hard.txt")
+        assertTrue(hard.isFile)
+        assertEquals("shared", hard.readText())
+        // 真硬链的话两边内容一定同步
+        real.writeText("changed")
+        assertEquals("changed", hard.readText())
+    }
+
+    @Test
+    fun `目录条目上的软链会被替换成真目录`() {
+        val dest = temp.newFolder("dest-dir-symlink")
+        val tar = buildTar { out ->
+            out.addDir("sub/")
+            out.addFile("sub/inner.txt", "inner")
+        }
+        // 先放一个指向树外的「同名目录」软链
+        val outsideDir = temp.newFolder("outside-dir")
+        try {
+            java.nio.file.Files.createSymbolicLink(File(dest, "sub").toPath(), outsideDir.toPath())
+        } catch (_: Exception) {
+            org.junit.Assume.assumeTrue("当前平台不支持创建软链，跳过该用例", false)
+        }
+        TarExtract.extract(tar, dest)
+
+        assertEquals("inner", File(dest, "sub/inner.txt").readText())
+        assertFalse(File(outsideDir, "inner.txt").exists())
+    }
+
+    @Test
     fun `取消回调会中断解压`() {
         val tar = buildTar { out ->
             repeat(200) { index -> out.addFile("f/$index.txt", "x".repeat(200)) }

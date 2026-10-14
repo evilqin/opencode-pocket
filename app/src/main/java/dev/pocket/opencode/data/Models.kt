@@ -113,6 +113,31 @@ data class ProviderInfo(
 
 data class AgentInfo(val name: String, val description: String, val mode: String, val isPrimary: Boolean)
 
+/** 会话改动里的单个文件（GET /session/:id/diff）。 */
+data class FileDiffInfo(
+    val file: String,
+    val additions: Int,
+    val deletions: Int,
+    val before: String,
+    val after: String,
+    val status: String = "",
+) {
+    /** 列表里显示的短名（去掉工作区前缀，太长的话只留末尾两段）。 */
+    val shortName: String
+        get() {
+            val normalized = file.replace('\\', '/')
+            val parts = normalized.split('/').filter { it.isNotBlank() }
+            return when {
+                parts.isEmpty() -> normalized
+                parts.size <= 2 -> parts.joinToString("/")
+                else -> parts.takeLast(2).joinToString("/")
+            }
+        }
+
+    val isNew: Boolean get() = before.isEmpty() && after.isNotEmpty()
+    val isDeleted: Boolean get() = after.isEmpty() && before.isNotEmpty()
+}
+
 /** JSON -> 模型（全部字段容错，服务端版本变化不会崩）。 */
 object Parsers {
 
@@ -259,6 +284,28 @@ object Parsers {
                 mode = mode,
                 isPrimary = mode != "subagent",
             )
+        }
+        return result
+    }
+
+    /** 单个文件改动。字段缺失时用 additions/deletions 兜底统计。 */
+    fun fileDiff(json: JSONObject): FileDiffInfo {
+        val before = json.optString("before")
+        val after = json.optString("after")
+        return FileDiffInfo(
+            file = json.optString("file").ifBlank { json.optString("path") },
+            additions = json.optInt("additions", 0),
+            deletions = json.optInt("deletions", 0),
+            before = before,
+            after = after,
+            status = json.optString("status"),
+        )
+    }
+
+    fun fileDiffs(json: JSONArray): List<FileDiffInfo> {
+        val result = ArrayList<FileDiffInfo>(json.length())
+        for (i in 0 until json.length()) {
+            json.optJSONObject(i)?.let { result += fileDiff(it) }
         }
         return result
     }
