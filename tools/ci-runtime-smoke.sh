@@ -209,10 +209,24 @@ if [ ! -x "$ROOTFS/usr/local/bin/node" ]; then
   rm -rf "$WORK/node-extract"
   mkdir -p "$WORK/node-extract"
   tar -xJf "$WORK/$FILE" -C "$WORK/node-extract" --strip-components=1
+  # 先确认本地解压没问题，再拷贝进 rootfs（区分"解压丢了"还是"拷贝丢了"）
+  test -f "$WORK/node-extract/lib/node_modules/npm/node_modules/walk-up-path/dist/commonjs/index.js" \
+    || fail "本地解压后缺少 npm 的 bundled 依赖（tarball 或 tar 有问题）"
   mkdir -p "$ROOTFS/usr/local"
   cp -a "$WORK/node-extract/." "$ROOTFS/usr/local/"
 fi
-run 'node -v && npm -v'
+
+log "Node 安装结果自检"
+run 'node -v'
+run 'ls -l /usr/local/bin/npm /usr/local/bin/npx 2>&1 | head -n 3'
+if run 'test -f /usr/local/lib/node_modules/npm/node_modules/walk-up-path/dist/commonjs/index.js'; then
+  log "npm 的 bundled 依赖在容器里也齐全"
+else
+  log "⚠️ 容器里缺 npm 的 bundled 依赖（walk-up-path），先记下来"
+fi
+if ! run 'npm -v'; then
+  log "⚠️ npm 在容器里跑不起来（opencode 自身不依赖 npm；App 的 Node 步骤会验证它，需要单独看）"
+fi
 mark "Node 就绪"
 
 # ---------------------------------------------------------------- opencode（走 npm 镜像直取）
