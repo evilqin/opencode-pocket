@@ -27,7 +27,13 @@ object ProotArgs {
 
     fun cwd(path: String): String = "--cwd=$path"
 
-    /** 绑定挂载：宿主与 guest 相同就只写一个路径，否则 `host:guest`。 */
+    /**
+     * 绑定挂载：宿主与 guest 相同就只写一个路径，否则 `host:guest`。
+     *
+     * 注意必须写成 `--bind=host:guest`（**一个** argv 元素）：proot 的长选项要求值紧跟 `=`，
+     * 写成两个参数（`--bind`、`/dev`）会被拒绝 —— `option '--bind' and its value must be
+     * separated by '='`。短选项 `-b /dev` 倒是允许，但短选项名在不同构建里不保证存在。
+     */
     fun bind(host: String, guest: String): List<String> =
-        listOf("--bind", if (host == guest) host else "$host:$guest")
+        listOf("--bind=${if (host == guest) host else "$host:$guest"}")
 }

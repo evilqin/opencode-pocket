@@ -36,15 +36,32 @@ class ProotArgsTest {
 
     @Test
     fun `绑定挂载同路径只写一次`() {
-        assertEquals(listOf("--bind", "/dev"), ProotArgs.bind("/dev", "/dev"))
+        assertEquals(listOf("--bind=/dev"), ProotArgs.bind("/dev", "/dev"))
     }
 
     @Test
     fun `绑定挂载异路径写宿主冒号 guest`() {
         assertEquals(
-            listOf("--bind", "/data/user/0/dev.pocket/files/linux/shm:/dev/shm"),
+            listOf("--bind=/data/user/0/dev.pocket/files/linux/shm:/dev/shm"),
             ProotArgs.bind("/data/user/0/dev.pocket/files/linux/shm", "/dev/shm"),
         )
+    }
+
+    @Test
+    fun `绑定挂载必须是一个 argv 元素（长选项要求等号）`() {
+        val argv = ProotArgs.bind("/dev", "/proc")
+        assertEquals(1, argv.size)
+        assertTrue("必须带 =：${argv[0]}", argv[0].contains("="))
+        // 拆成两个元素会被 proot 拒绝：
+        //   option '--bind' and its value must be separated by '='
+        assertFalse(argv.contains("--bind"))
+    }
+
+    @Test
+    fun `所有长选项都带等号传值`() {
+        assertTrue(ProotArgs.rootfs("/x").startsWith("--rootfs="))
+        assertTrue(ProotArgs.cwd("/x").startsWith("--cwd="))
+        assertTrue(ProotArgs.bind("/a", "/b")[0].startsWith("--bind="))
     }
 
     @Test

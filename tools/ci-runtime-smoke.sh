@@ -67,14 +67,15 @@ add_flag() {
   if printf '%s' "$PROOT_HELP" | grep -q -- "$1"; then
     PROOT_ARGS+=("$1")
   else
-    printf '[smoke] 注意：本机 proot 不支持 %s，已跳过（Termux proot 支持）\n' "$1"
+    printf '[smoke] 注意：本机 proot 不支持 %s，已跳过（Termux proot 支持它，CI 另用 ELF 扫描复核）\n' "$1"
   fi
 }
 add_flag --sysvipc
 add_flag --kill-on-exit
 PROOT_ARGS+=(-0)   # fake root：所有构建都支持
+# 绑定挂载必须写成 --bind=xxx（一个 argv 元素）：proot 的长选项要求值紧跟 '='
 for bind in /dev /proc /sys /dev/urandom:/dev/random; do
-  PROOT_ARGS+=(--bind "$bind")
+  PROOT_ARGS+=("--bind=$bind")
 done
 
 printf 'nameserver 223.5.5.5\nnameserver 119.29.29.29\n' > "$ROOTFS/etc/resolv.conf"

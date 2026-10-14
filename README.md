@@ -27,6 +27,7 @@
 | 多源测速 | Ubuntu / apt / Node / npm 四类镜像，用**真实文件**做 Range 测速（延迟 + 带宽），自动选最快 |
 | 服务管理 | 前台服务常驻，通知栏显示状态与「停止」动作；健康检查轮询 `/global/health` |
 | 原生对话 | 会话列表、流式回复、思考过程折叠、工具调用卡片、权限请求（允许一次/始终允许/拒绝）、模型与代理切换 |
+| 本次改动 | 会话页点开：列出 agent 改过的文件与 `+/-` 统计，逐行看统一差分（本地计算，可复制差分或新内容） |
 | Web UI | 内嵌 WebView 打开 `opencode web` 的官方界面，可跳外部浏览器 |
 | 终端 | 类 shell 的命令执行（cwd 保持），快捷命令；安装日志 / 运行日志各一份，可复制可分享 |
 | 设置 | 12 个常用 provider 的 API Key、默认模型、端口、权限策略、低内存模式、工作区、主题、维护工具 |
@@ -45,10 +46,10 @@
 2. 手机需要 **ARM64**，Android **11（API 30）及以上**。
 3. 安装后打开 → 「开始安装」→ 选镜像 → 等 5 分钟左右。
 
-> 仓库里的 `dist/` 放了三份构建产物（当前 1.2.0）：
-> `*-arm64.apk`（标准包，28.2 MB，未混淆，最稳）、
-> `*-arm64-slim.apk`（R8 精简包，**4.1 MB**，体积小但需要真机回归一遍）、
-> `*-debug.apk`（调试包，37.0 MB，日志最全）。
+> 三份构建产物都在 [Releases](../../releases) 里（当前 1.3.0）：
+> `*-arm64.apk`（标准包，未混淆，最稳）、
+> `*-arm64-slim.apk`（R8 精简包，约 4 MB，体积小但需要真机回归一遍）、
+> `*-debug.apk`（调试包，日志最全）。
 
 ### 方式二：自己构建
 
@@ -59,18 +60,21 @@ git clone <this-repo> && cd opencode-pocket
 node tools/fetch-boot-runtime.mjs
 
 # 2) 单元测试 + 构建
-./gradlew :app:testDebugUnitTest    # 120 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
+./gradlew :app:testDebugUnitTest    # 142 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / tar 安全 / 差分 / proot 参数）
 ./gradlew :app:assembleDebug        # 产物：app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assembleRelease      # 默认用 debug 签名，可直接安装
 
 # 可选：R8 精简包（4 MB 左右；会重写代码，务必真机回归）
 ./gradlew :app:assembleRelease "-Ppocket.minify=true"
+
+# 可选：在 Linux 上把容器配方整条跑一遍（CI 也会跑，见下）
+bash tools/ci-runtime-smoke.sh
 ```
 
-**发布新版本**：改 `app/build.gradle.kts` 里的 `versionCode` / `versionName`，然后推一个同名标签即可自动构建并发布 Release（CI 会先校验 tag 与 versionName 一致）：
+**发布新版本**：改 `app/build.gradle.kts` 里的 `versionCode` / `versionName`，然后推一个同名标签即可自动构建并发布 Release（CI 会先校验 tag 与 versionName 一致，并且**必须先通过容器冒烟测试**）：
 
 ```bash
-git tag v1.2.1 && git push origin v1.2.1
+git tag v1.3.1 && git push origin v1.3.1
 ```
 
 环境要求：JDK 21+、Android SDK（platform 37 + build-tools 36.0.0）、Node 20+（只用来跑取件脚本）。
@@ -140,8 +144,10 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 - **硬链接**：app 私有目录（f2fs/ext4）支持硬链接，`--link2symlink` 只在探测失败时才启用。
 - **apt 在 proot 里**：`APT::Sandbox::User=root`，否则 apt 会尝试切换到 `_apt` 用户而失败；
   源统一改写成经典 `sources.list`（去掉 deb822 的那份，避免双份源互相打架）。
-- **不给系统添乱**：`--kill-on-exit` 保证 proot 一死带走整棵进程树；停止时再补一次
-  `pkill -9 -f opencode` 兜底。
+- **不给系统添乱**：`--kill-on-exit` 保证 proot 一死带走整棵进程树；停止服务时按容器内记录的
+  pid 精确清理（**不用** `pkill -f opencode`——包名里就带 opencode，会误杀 App 自身）。
+- **proot 参数只用长选项**：不同构建支持的选项名不一样（Ubuntu 24.04 的 proot 5.1.0 就不认 `-L`），
+  所以统一用 `--sysvipc` / `--bind` 这类长选项，并由 CI 扫描内置二进制逐一复核（见下）。
 - **设备 Shell 桥**：Android 10+ 的普通应用既没有 shell 身份也不能执行系统命令，所以走 Shizuku 的
   「用户服务」：Shizuku 会把我们 APK 里的 `DeviceShellUserService`（**必须继承 AIDL 生成的 `Stub`**，
   并实现保留事务 `destroy() = 16777114`）加载到它的 shell/root 进程里，App 只通过 Binder 调用；
@@ -156,10 +162,11 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 开发机上已经实际构建并通过以下检查（Windows + JDK 25 + Gradle 9.5 + AGP 9.3.3）：
 
-- **50 → 120 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
+- **142 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
   `opencode.json` 生成、环境变量映射、版本比较（含 `24.04.10 > 24.04.9` 这种坑）、
   **上游文件解析（Node index.json 的 `files` 字段、Ubuntu 目录列表、SHA256SUMS 文本）**、
-  Markdown 解析、格式化输出；以及**安装状态合并 / SSE 解析 / 设置编解码 / 摘要与文件操作 / tar 安全边界 / 危险命令防护 / 日志脱敏 / 工作区策略**；
+  Markdown 解析、格式化输出；以及**安装状态合并 / SSE 解析 / 设置编解码 / 摘要与文件操作 /
+  tar 安全边界（含真实软链与硬链）/ 危险命令防护 / 日志脱敏 / 工作区策略 / 统一差分 / proot 参数**；
 - **打包自检**（`tools/verify-apk.mjs`）：4 个内置 ELF 与 `jniLibs` **逐字节一致**（proot 的入口点没有被
   strip 改写）、只含 `arm64-v8a`、容器脚本齐全；有 aapt2 时进一步核对合并后的 manifest
   （`extractNativeLibs=true`、前台服务类型 `specialUse`、各组件名）；并直接在 dex 里确认
@@ -168,48 +175,47 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
   验证不通过的（sjtu 的 ubuntu-cdimage、ustc 的 nodejs-release、tuna 的 npm）已从列表移除，
   另外补了 cernet / zju / bfsu / tencent 等可用源；
 - 内置运行时全部来自 Termux 官方仓库（proot 5.1.107.96 / libtalloc 2.5.0 / libandroid-shmem 0.7），
-  `tools/fetch-boot-runtime.mjs` 会校验 sha256 并写入 `jniLibs/boot-runtime.json`。
+  `tools/fetch-boot-runtime.mjs` 会校验 sha256、写入 `jniLibs/boot-runtime.json`，**并扫描 proot
+  的选项表复核 App 依赖的 6 个长选项都在**。
+
+### CI 里真的把容器跑一遍（1.3.0 新增）
+
+`smoke` 任务在 Linux runner 上用 proot 把整条链路跑通，**并且是发布闸门**（`release` 依赖它）：
+
+| 步骤 | 验证什么 |
+| --- | --- |
+| 下载 `ubuntu-base` rootfs + `SHA256SUMS` | 镜像目录结构没变、摘要校验路径可用 |
+| 用与 App 一致的 proot 参数启动（`--sysvipc --kill-on-exit -0 --rootfs --cwd --bind`） | 参数名对得上真实 proot（**这条曾抓出 `-L` 的坑**） |
+| 执行仓库里的 `profile.sh` / `setup-env.sh` | 容器脚本能跑、目录 / npmrc / banner / locale 都对 |
+| 走镜像直取 Node 与 opencode（含摘要校验） | 「从镜像直取二进制」这条路可行 |
+| `opencode --version` | **Bun 二进制在 proot 下能不能跑**（整个项目最大的未知） |
+| 起 `serve` 与 `web`，跑健康检查 / 会话 / providers / agent / SSE / 401 鉴权 / abort / 删除 | 原生客户端依赖的 REST + SSE 契约与口令注入成立；`web` 是否自带 UI |
+| `dexec` 在未启用 / 桥不可达时的报错 | 设备桥脚本的错误路径可读 |
 
 必须拿到真机才能验证的部分（CI 覆盖不到）：
 
-- 容器能否正常起来、apt 是否能装包、以及最关键的：opencode 的 Bun 二进制在 proot 下能否正常跑；
+- 容器在 **Android 上**能否起来（Android 的 W^X、phantom-killer、各家 ROM 的省电策略都在 CI 之外）；
 - Shizuku 用户服务（`dexec`）的绑定与执行；
-- 各家 ROM 的省电策略与 Android 12+ 幻影进程限制；
+- apt 在手机侧网络下装包、>60 分钟长跑与 SSE 泄漏、覆盖安装签名矩阵；
 - R8 精简包的功能回归（所以默认发布的还是未混淆版本）。
 
-## 1.2.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
+## 1.3.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
+
+- **CI 里真的把容器跑一遍**：Linux + proot 全流程（rootfs → 脚本 → Node/opencode → 服务与 API），
+  并作为发布闸门；第一次运行就抓出 proot 短选项 `-L` 在部分构建不存在的真机级问题
+- **统一改用长选项**（`--sysvipc` / `--bind`），参数抽成 `ProotArgs` 由单测钉住，
+  CI 还会扫描内置 proot 二进制复核这些选项名
+- **新增「本次改动」视图**：文件列表 + 增删统计 + 本地计算的彩色统一差分
+- **tar 解压改用 `java.nio.file`**：软链/硬链防护在单测里可验证（不再是空转）
+- 单元测试 120 → 142；GitHub Actions 全部固定到 commit SHA
+
+## 1.2.0 重点
 
 - **本机服务加随机口令**：loopback 对同机所有 App 开放，现在 opencode 服务与设备桥都必须带口令/Bearer token
-- **默认权限策略改为 sk**，并且**不再默认把整个 /sdcard 挂进容器**
+- **默认权限策略改为 `ask`**，并且**不再默认把整个 /sdcard 挂进容器**
 - **设备桥危险命令防护 + 审计日志**；导出日志自动打码密钥与口令
 - 修复上一轮引入的 P0：非续传下载用非法模式、pkill 误杀 App 自身；rootfs 自检失败会回滚
 - 单元测试 50 → 120；CI 增加版本单调校验与可选正式签名
-
-## 1.1.0 修复记录
-
-这一轮做了一次全量审查（容器层 / UI 层 / 服务与协议层三路并行），修掉的问题按严重度列几个代表性的：
-
-| 严重度 | 问题 | 修复 |
-| --- | --- | --- |
-| P0 | 断点续传用 `RandomAccessFile(part, "r")` 打开后写入，续传必然失败 | 改成 `"rw"`，并校验 `Content-Range` 起点 |
-| P0 | Shizuku 用户服务写成了 `android.app.Service`，Shizuku 只接受 AIDL `Stub` | 改为继承 `IDeviceShellService.Stub`，补上保留事务 `destroy() = 16777114` |
-| P0 | 容器配置探测路径漏了 `root/`，装完重启就回到「未安装」 | 统一用 `Guest.OPENCODE_CONFIG`（= `/root/.config/...`）推导宿主路径 |
-| P0 | 取消安装后立刻再点安装会起两套流水线同时删/解压同一 rootfs | 取消改为「请求 + 等旧任务真正结束」；下载与解压都带取消检查点 |
-| P0 | 前台服务收集到状态流的初始 STOPPED 就 `stopSelf()`，刚起来就自杀 | 只由 `ACTION_STOP` 停止服务 |
-| P1 | 命令超时/取消靠 `withTimeout`，拦不住阻塞的 `readLine`；且 stdin 永不关闭 → `dpkg`/`cat` 永久挂死 | 看门狗杀进程 + 立刻关闭子进程 stdin + 输出环形缓冲 |
-| P1 | 安装失败后 `refresh()` 把 FAILED 与错误原因抹掉，用户「看不到发生了什么」 | 失败状态与错误文本落盘并在刷新时保留 |
-| P1 | rootfs 先删后解压，中途失败会毁掉可用环境；下载包在自检前就删了 | 解压到 `ubuntu.new` 再原子替换；自检通过后才删下载包 |
-| P1 | tar 里软链/硬链的目标没校验，恶意 tarball 可以写出沙箱 | 父目录真实路径必须在目标树内，否则跳过并计数 |
-| P1 | 下载不做摘要校验 | 接上 Ubuntu `SHA256SUMS`、Node `SHASUMS256.txt`、npm `dist.shasum`（拿不到时降级为仅 HTTPS） |
-| P1 | 自写 HTTP 桥按**字符**读 `Content-Length`，中文命令会卡 15 秒后空响应 | 改为按字节读 + 整体 UTF-8 解码，并处理 `Expect: 100-continue` |
-| P1 | 设备桥改端口不重建监听；并发 sync 会把可用状态写成禁用 | 记录真实监听端口，变更即重建；`syncNow()` 加互斥锁 |
-| P1 | `pkill -9 -f opencode` 会匹配到自己；健康检查超时不清理进程 | 用 `[o]pencode` 模式；超时后杀进程并复位状态 |
-| P1 | 首页每秒重组、工作区解析在主线程、导出日志读写在主线程（ANR 风险） | 全部挪到 IO 线程 / 仅在服务运行时刷新 |
-| P1 | 对话页：连点发送丢草稿、权限回复失败不回滚、`session.error` 串会话、SSE 空闲 30 秒被自己掐断 | 同步抢锁 + 失败回滚 + 会话过滤 + SSE 关闭读超时（重连后自动补拉历史） |
-| P2 | 镜像里 Node 的 arm64 判定写错（`files` 是平台标识不是文件名）→ Node 步骤必失败 | 改为匹配 `linux-arm64`，并加单测锁住 |
-| P2 | `deleteRecursively()` / `walkTopDown()` 会跟随符号链接（rootfs 里有 `var/run -> /run`） | 新增 `FileOps`：删除/统计都不跟随链接 |
-
-任何一步失败时：安装页会显示该步的错误与可重试按钮，「终端 → 安装日志 / 运行日志」有完整输出。
 
 ## 常见问题
 
