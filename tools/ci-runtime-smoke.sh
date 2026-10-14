@@ -131,11 +131,15 @@ APT_LOG="$WORK/apt.log"
 run 'bash /root/.pocket/setup-apt.sh' > "$APT_LOG" 2>&1 || { tail -n 25 "$APT_LOG"; fail "setup-apt.sh 失败（apt 源或 keyring 有问题）"; }
 grep -q POCKET_APT_READY "$APT_LOG" || { tail -n 25 "$APT_LOG"; fail "setup-apt.sh 没有输出 POCKET_APT_READY"; }
 run "grep -q '$APT_MIRROR' /etc/apt/sources.list && echo sources-ok"
+log "apt-get update 的关键输出："
+grep -E "^(Get|Hit|Ign|Err|W:|E:|Fetched|Reading)" "$APT_LOG" | head -n 12 || true
+log "诊断：索引目录与源配置"
+run 'ls -la /var/lib/apt/lists | head -n 12; echo "--- sources.list ---"; cat /etc/apt/sources.list; echo "--- apt Dir 配置 ---"; apt-config dump | grep -iE "Dir::State|Dir::Etc" | head -n 10'
 log "apt 源就绪（含 apt-get update）"
 
 log "安装容器基础工具：apt + dpkg 在 proot 假 root 下能不能真的用（真机最怕这一步）"
 TOOLS_LOG="$WORK/tools.log"
-run 'bash /root/.pocket/install-tools.sh' > "$TOOLS_LOG" 2>&1 || { tail -n 30 "$TOOLS_LOG"; fail "install-tools.sh 失败"; }
+run 'bash /root/.pocket/install-tools.sh' > "$TOOLS_LOG" 2>&1 || { tail -n 30 "$TOOLS_LOG"; run 'ls -la /var/lib/apt/lists | head -n 12' || true; fail "install-tools.sh 失败"; }
 grep -q POCKET_TOOLS_READY "$TOOLS_LOG" || { tail -n 30 "$TOOLS_LOG"; fail "install-tools.sh 没有输出 POCKET_TOOLS_READY"; }
 run 'git --version && curl --version | head -n1 && rg --version | head -n1'
 

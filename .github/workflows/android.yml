@@ -164,7 +164,7 @@ jobs:
       - name: 冒烟失败时打印关键日志
         if: failure()
         run: |
-          for f in .smoke/serve.log .smoke/web.log; do
+          for f in .smoke/serve.log .smoke/web.log .smoke/apt.log .smoke/tools.log; do
             if [ -f "$f" ]; then
               echo "==== $f ===="
               tail -n 60 "$f"

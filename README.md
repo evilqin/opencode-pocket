@@ -185,9 +185,11 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 | 步骤 | 验证什么 |
 | --- | --- |
 | 下载 `ubuntu-base` rootfs + `SHA256SUMS` | 镜像目录结构没变、摘要校验路径可用 |
-| 用与 App 一致的 proot 参数启动（`--sysvipc --kill-on-exit -0 --rootfs --cwd --bind`） | 参数名对得上真实 proot（**这条曾抓出 `-L` 的坑**） |
+| 用与 App 一致的 proot 参数启动（`--sysvipc --kill-on-exit -0 --rootfs --cwd --bind`） | 参数名与传值方式对得上真实 proot（**曾抓出 `-L`、`--bind x` 两个坑**） |
 | 执行仓库里的 `profile.sh` / `setup-env.sh` | 容器脚本能跑、目录 / npmrc / banner / locale 都对 |
-| 走镜像直取 Node 与 opencode（含摘要校验） | 「从镜像直取二进制」这条路可行 |
+| 执行 `setup-apt.sh` + `install-tools.sh` | apt 源与 keyring、**apt + dpkg 在 proot 假 root 下真的能装包** |
+| `git init/commit` | 容器里的 git 可用（opencode 的快照与回滚依赖它） |
+| 走镜像直取 Node 与 opencode（`SHASUMS256` / `dist.shasum` 校验） | 「从镜像直取二进制」这条路可行，包校验字段确实存在 |
 | `opencode --version` | **Bun 二进制在 proot 下能不能跑**（整个项目最大的未知） |
 | 起 `serve` 与 `web`，跑健康检查 / 会话 / providers / agent / SSE / 401 鉴权 / abort / 删除 | 原生客户端依赖的 REST + SSE 契约与口令注入成立；`web` 是否自带 UI |
 | `dexec` 在未启用 / 桥不可达时的报错 | 设备桥脚本的错误路径可读 |
