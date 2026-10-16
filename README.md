@@ -1,5 +1,7 @@
 # OpenCode 口袋（OpenCode Pocket）
 
+> **简体中文** | [English](README.en.md)
+
 把官方 [opencode](https://github.com/anomalyco/opencode) 装进一台「口袋里的 Ubuntu」——原生 Android 应用，
 内置 proot 运行时，无需 root、无需 Termux、无需电脑，手机上点几下就能用。
 
@@ -162,7 +164,7 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 开发机上已经实际构建并通过以下检查（Windows + JDK 25 + Gradle 9.5 + AGP 9.3.3）：
 
-- **148 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
+- **161 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
   `opencode.json` 生成、环境变量映射、版本比较（含 `24.04.10 > 24.04.9` 这种坑）、
   **上游文件解析（Node index.json 的 `files` 字段、Ubuntu 目录列表、SHA256SUMS 文本）**、
   Markdown 解析、格式化输出；以及**安装状态合并 / SSE 解析 / 设置编解码 / 摘要与文件操作 /
@@ -323,7 +325,7 @@ app/src/main/java/dev/pocket/opencode/
 app/src/main/aidl/            Shizuku 用户服务的 Binder 接口（含 destroy 保留事务）
 app/src/main/assets/scripts/  容器内执行的 shell 脚本（apt、工具、收尾）
 app/src/main/assets/device-shell/  dexec 命令与 device-shell 技能模板
-app/src/test/                 120 个 JVM 单元测试（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
+app/src/test/                 161 个 JVM 单元测试（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
 tools/fetch-boot-runtime.mjs  拉取 Termux 官方 proot 运行时并校验，落到 jniLibs
 tools/verify-apk.mjs          打包自检：内置 ELF 是否被改、ABI、容器脚本、manifest、Shizuku 类
 tools/mirror-check.mjs        镜像源体检：25 个端点用真实请求逐个验证
