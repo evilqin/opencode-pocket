@@ -31,6 +31,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -45,6 +46,8 @@ import dev.pocket.opencode.ui.components.EmptyState
 import dev.pocket.opencode.ui.components.copyToClipboard
 import dev.pocket.opencode.ui.theme.CodeTextStyle
 import dev.pocket.opencode.ui.theme.PocketColors
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 /**
  * 「本次改动」视图：列出会话里被 agent 改过的文件，点进去看统一差分。
  *
@@ -196,11 +199,23 @@ private fun StatusTag(text: String, color: Color) {
 @Composable
 private fun DiffDetail(diff: FileDiffInfo) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val lines = remember(diff.file, diff.before, diff.after) {
-        UnifiedDiff.compute(diff.before, diff.after)
+    // 差分计算可能涉及大文本，放到 Default 线程，避免阻塞主线程
+    val lines by produceState<List<UnifiedDiff.Line>?>(null, diff.file, diff.before, diff.after) {
+        value = withContext(Dispatchers.Default) {
+            UnifiedDiff.compute(diff.before, diff.after)
+        }
+    }
+    // produceState 的委托属性不能被智能转换：先拷到局部变量再判空
+    val computed = lines
+
+    if (computed == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator(Modifier.size(28.dp))
+        }
+        return
     }
 
-    if (lines.isEmpty()) {
+    if (computed.isEmpty()) {
         // 服务端可能只给了统计（before/after 被省略）
         EmptyState(
             icon = PocketIcons.Code,
@@ -217,7 +232,7 @@ private fun DiffDetail(diff: FileDiffInfo) {
     val scroll = rememberScrollState()
     Column(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(vertical = 6.dp)) {
-            itemsIndexed(lines) { index, line ->
+            itemsIndexed(computed) { index, line ->
                 val background = when (line) {
                     is UnifiedDiff.Line.Add -> PocketColors.Emerald.copy(alpha = 0.12f)
                     is UnifiedDiff.Line.Remove -> PocketColors.Rose.copy(alpha = 0.12f)
@@ -251,7 +266,7 @@ private fun DiffDetail(diff: FileDiffInfo) {
                         )
                     }
                 }
-                if (index == lines.lastIndex) Spacer(Modifier.height(4.dp))
+                if (index == computed.lastIndex) Spacer(Modifier.height(4.dp))
             }
         }
         Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
@@ -261,7 +276,7 @@ private fun DiffDetail(diff: FileDiffInfo) {
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = { copyToClipboard(context, UnifiedDiff.render(lines), "差分已复制") }) {
+                TextButton(onClick = { copyToClipboard(context, UnifiedDiff.render(computed), "差分已复制") }) {
                     Text("复制差分")
                 }
                 TextButton(onClick = { copyToClipboard(context, diff.after, "新文件内容已复制") }) {

@@ -82,6 +82,7 @@ fun SettingsScreen(engine: PocketEngine) {
     val server by engine.server.status.collectAsStateWithLifecycle()
     val bridge by engine.deviceShell.status.collectAsStateWithLifecycle()
     var dialog by remember { mutableStateOf<SettingsDialog?>(null) }
+    var showRegeneratePassword by remember { mutableStateOf(false) }
     var bridgeTest by remember { mutableStateOf<String?>(null) }
     var auditTail by remember { mutableStateOf<List<String>?>(null) }
 
@@ -244,13 +245,7 @@ fun SettingsScreen(engine: PocketEngine) {
                         icon = Icons.Filled.Refresh,
                         title = "重新生成服务口令",
                         subtitle = "生成后需要重启服务才生效",
-                        onClick = {
-                            scope.launch {
-                                engine.settings.update { it.copy(serverPassword = "") }
-                                engine.settings.ensureServerPassword()
-                                if (server.running) engine.startServer(restart = true)
-                            }
-                        },
+                        onClick = { showRegeneratePassword = true },
                     )
                     SettingRow(
                         icon = PocketIcons.Chip,
@@ -438,8 +433,8 @@ fun SettingsScreen(engine: PocketEngine) {
                         !bridge.granted -> SettingRow(
                             icon = PocketIcons.Shield,
                             title = "请求 Shizuku 授权",
-                            subtitle = if (engine.deviceShell.shizuku.deniedForever()) {
-                                "已被拒绝，需要到 Shizuku 应用里手动允许本应用"
+                            subtitle = if (engine.deviceShell.shizuku.needsManualGrant()) {
+                                "系统可能不再弹授权框，请到 Shizuku 应用里手动允许本应用"
                             } else {
                                 "点一下弹出授权框"
                             },
@@ -875,6 +870,27 @@ fun SettingsScreen(engine: PocketEngine) {
         )
 
         null -> Unit
+    }
+
+    if (showRegeneratePassword) {
+        AlertDialog(
+            onDismissRequest = { showRegeneratePassword = false },
+            title = { Text("重新生成服务口令？") },
+            text = { Text("旧口令会立即失效，服务将重启一次；已经打开的网页和终端都需要重新连接。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showRegeneratePassword = false
+                        scope.launch {
+                            engine.settings.update { it.copy(serverPassword = "") }
+                            engine.settings.ensureServerPassword()
+                            if (server.running) engine.startServer(restart = true)
+                        }
+                    },
+                ) { Text("重新生成") }
+            },
+            dismissButton = { TextButton(onClick = { showRegeneratePassword = false }) { Text("取消") } },
+        )
     }
 
     bridgeTest?.let { result ->

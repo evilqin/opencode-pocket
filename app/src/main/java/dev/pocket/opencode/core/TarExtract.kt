@@ -149,7 +149,8 @@ object TarExtract {
             return
         }
         val target = File(dest, relative)
-        val mode = entry.mode and 0x1FF
+        // 保留 rwx 三位 + setuid/setgid/sticky：/tmp 的 1777 不能退化成 0777，/var/mail 的 2775 不能丢 setgid
+        val mode = entry.mode and 0xFFF
 
         when {
             // 设备节点 / FIFO 必须先判掉：commons-compress 的 isFile() 对这些类型也返回 true，
@@ -195,7 +196,8 @@ object TarExtract {
                     return
                 }
                 val source = File(dest, sourceRelative)
-                if (escapesTree(root, target) || escapesTree(root, source) || !source.isFile) {
+                // 源也不能是软链：link() 不解引用，会产出一条新软链；copyTo 兜底则会跟随链接把树外内容拷进来
+                if (escapesTree(root, target) || escapesTree(root, source) || FileOps.isSymlink(source) || !source.isFile) {
                     stats.skippedLinks++
                     return
                 }
@@ -230,7 +232,11 @@ object TarExtract {
                         if (!isActive()) throw CancellationException("解压已取消")
                         val want = minOf(buffer.size.toLong(), entry.size - written).toInt()
                         val count = tar.read(buffer, 0, want)
-                        if (count < 0) break
+                        if (count < 0) {
+                            // tar 声称有 entry.size 字节却没读满：包被截断了。
+                            // 静默产出截断文件会让「安装完成」变得不可信，直接失败让上层重下。
+                            throw java.io.IOException("tar 数据不完整：${entry.name}（${written}/${entry.size} 字节）")
+                        }
                         output.write(buffer, 0, count)
                         written += count
                         stats.bytes += count

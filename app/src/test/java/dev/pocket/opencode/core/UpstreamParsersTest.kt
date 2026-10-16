@@ -3,6 +3,7 @@ package dev.pocket.opencode.core
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -99,5 +100,38 @@ class UpstreamParsersTest {
                 "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2  ./releases/ubuntu-base-24.04.5-base-arm64.tar.gz",
             ),
         )
+    }
+
+    // -------------------------------------------- 目录列表不可用时的 SHA256SUMS 回退
+
+    @Test
+    fun `从 SHA256SUMS 里列出候选 rootfs 且按版本号倒序`() {
+        val sums = """
+        1111111111111111111111111111111111111111111111111111111111111111 *ubuntu-base-24.04.5-base-arm64.tar.gz
+        2222222222222222222222222222222222222222222222222222222222222222  ubuntu-base-24.04.10-base-arm64.tar.gz
+        3333333333333333333333333333333333333333333333333333333333333333  ubuntu-base-24.04.3-base-arm64.tar.gz
+        4444444444444444444444444444444444444444444444444444444444444444  ubuntu-base-24.04.10-base-amd64.tar.gz
+        """.trimIndent() + "\n"
+        assertEquals(
+            listOf(
+                "ubuntu-base-24.04.10-base-arm64.tar.gz",
+                "ubuntu-base-24.04.5-base-arm64.tar.gz",
+                "ubuntu-base-24.04.3-base-arm64.tar.gz",
+            ),
+            UpstreamParsers.ubuntuBaseCandidates(sums),
+        )
+    }
+
+    @Test
+    fun `SHA256SUMS 里的重复项会去重、无关内容会被忽略`() {
+        val sums = """
+        # comment
+        not-a-digest  some-file.txt
+        5555555555555555555555555555555555555555555555555555555555555555  ubuntu-base-24.04.5-base-arm64.tar.gz
+        5555555555555555555555555555555555555555555555555555555555555555  ubuntu-base-24.04.5-base-arm64.tar.gz
+        """.trimIndent()
+        assertEquals(listOf("ubuntu-base-24.04.5-base-arm64.tar.gz"), UpstreamParsers.ubuntuBaseCandidates(sums))
+        assertTrue(UpstreamParsers.ubuntuBaseCandidates("").isEmpty())
+        assertTrue(UpstreamParsers.ubuntuBaseCandidates("garbage").isEmpty())
     }
 }

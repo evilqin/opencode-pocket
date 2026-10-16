@@ -19,8 +19,11 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -77,8 +80,18 @@ class ServerController(
     @Volatile
     private var _lastPassword: String = ""
 
+    /** 生命周期纪元：start/stop 都会 +1，让过期的启动协程不再写状态、不再清理新进程。 */
+    @Volatile
+    private var generation = 0L
+
+    /** 串行化 start/stop 的检查-置位（并发 START 不会拉起两个 proot）。 */
+    private val lifecycle = Mutex()
+
+    @Volatile
     private var process: Process? = null
+    @Volatile
     private var readerJob: Job? = null
+    @Volatile
     private var startJob: Job? = null
 
     fun baseUrl(port: Int = _status.value.port): String = "http://127.0.0.1:$port"
@@ -88,9 +101,6 @@ class ServerController(
     // ------------------------------------------------------------------ 启动
 
     suspend fun start(settings: AppSettings): Boolean {
-        if (isAlive()) return true
-        if (startJob?.isActive == true) return false
-
         if (settings.serverPassword.isBlank()) {
             _status.value = _status.value.copy(
                 phase = ServerPhase.ERROR,
@@ -111,64 +121,91 @@ class ServerController(
             return false
         }
 
-        val job = scope.launch {
-            try {
-                _status.value = ServerStatus(ServerPhase.STARTING, port = settings.port, hint = "准备容器…")
-                appendLog("▶ 启动 OpenCode 服务（端口 ${settings.port}）")
+        val job = lifecycle.withLock {
+            if (isAlive()) return true
+            if (startJob?.isActive == true) return false
+            generation += 1
+            val myGeneration = generation
+            scope.launch { runStart(myGeneration, settings) }.also { startJob = it }
+        }
+        job.join()
+        return _status.value.phase == ServerPhase.RUNNING
+    }
 
-                proot.stageBootRuntime()
-                net.writeResolvConf()
+    /**
+     * 启动主流程。
+     *
+     * [myGeneration] 是这一轮启动的纪元：stop()/restart() 会推进它，
+     * 过期的启动协程绝不能再写状态、也不能清理「新一轮」的进程。
+     */
+    private suspend fun runStart(myGeneration: Long, settings: AppSettings) {
+        try {
+            _status.value = ServerStatus(ServerPhase.STARTING, port = settings.port, hint = "准备容器…")
+            appendLog("▶ 启动 OpenCode 服务（端口 ${settings.port}）")
 
-                // 清掉上次残留的进程：按 guest 里记录的 pid 精确杀（见 CLEANUP_COMMAND 的注释）
+            proot.stageBootRuntime()
+            net.writeResolvConf()
+
+            // 清掉上次残留的进程：按 guest 里记录的 pid 精确杀（见 CLEANUP_COMMAND 的注释）
+            runCatching {
+                shell.run(
+                    CLEANUP_COMMAND,
+                    settings,
+                    timeoutMs = 20_000,
+                )
+            }
+
+            _status.value = _status.value.copy(hint = "拉起源码运行时…")
+            val env = OpencodeConfig.environment(settings)
+            val command =
+                "cd ${PocketPaths.Guest.WORKSPACE} 2>/dev/null || cd /root; " +
+                    // 记录 guest 侧的 pid：停止/清理时按 pid 精确杀。不要用 pkill -f opencode ——
+                    // App 自己的进程名里就带 opencode，而 /proc 被原样 bind 进容器，会误杀 App。
+                    "printf '%s' \$\$ > /tmp/opencode.pid; " +
+                    "exec opencode web --hostname 127.0.0.1 --port ${settings.port}"
+            val started = withContext(Dispatchers.IO) {
+                // 进程引用在阻塞块内部就登记：如果恰好在这个窗口被 stop() 取消，
+                // stop() 在 join 之后仍能从 process 拿到它并杀掉，不会留下孤儿进程。
+                proot.start(
+                    command = command,
+                    config = settings,
+                    extraEnv = env,
+                    cwd = PocketPaths.Guest.ROOT,
+                ).also { process = it }
+            }
+            readerJob = scope.launch { pump(myGeneration, started) }
+
+            _status.value = _status.value.copy(hint = "等待服务就绪…")
+            val healthy = awaitHealthy(settings.port, settings.serverPassword, timeoutMs = 240_000)
+
+            // 等待期间被 stop()/restart() 取代：什么都不做（进程与状态由那一侧负责）
+            if (generation != myGeneration) return
+
+            if (!healthy) {
+                // 起不来就别让它占着端口：先杀掉再报错
+                withContext(Dispatchers.IO) {
+                    runCatching { started.destroy() }
+                    delay(1_200)
+                    runCatching { started.destroyForcibly() }
+                }
+                // 只做收窄后的清理。绝不能用宽泛的 pkill -f '[o]pencode'：App 自己的
+                // 进程名里就带 opencode，而 /proc 是宿主共用的，会把它一起杀掉。
                 runCatching {
-                    shell.run(
-                        CLEANUP_COMMAND,
-                        settings,
-                        timeoutMs = 20_000,
-                    )
+                    shell.run(CLEANUP_COMMAND, settings, timeoutMs = 20_000)
                 }
-
-                _status.value = _status.value.copy(hint = "拉起源码运行时…")
-                val env = OpencodeConfig.environment(settings)
-                val command =
-                    "cd ${PocketPaths.Guest.WORKSPACE} 2>/dev/null || cd /root; " +
-                        // 记录 guest 侧的 pid：停止/清理时按 pid 精确杀。不要用 pkill -f opencode ——
-                        // App 自己的进程名里就带 opencode，而 /proc 被原样 bind 进容器，会误杀 App。
-                        "printf '%s' \$\$ > /tmp/opencode.pid; " +
-                        "exec opencode web --hostname 127.0.0.1 --port ${settings.port}"
-                val started = withContext(Dispatchers.IO) {
-                    proot.start(
-                        command = command,
-                        config = settings,
-                        extraEnv = env,
-                        cwd = PocketPaths.Guest.ROOT,
-                    )
-                }
-                process = started
-                readerJob = scope.launch { pump(started) }
-
-                _status.value = _status.value.copy(hint = "等待服务就绪…")
-                val healthy = awaitHealthy(settings.port, settings.serverPassword, timeoutMs = 240_000)
-                if (!healthy) {
-                    // 起不来就别让它占着端口：先杀掉再报错
-                    withContext(Dispatchers.IO) {
-                        runCatching { started.destroy() }
-                        delay(1_200)
-                        runCatching { started.destroyForcibly() }
-                    }
-                    runCatching {
-                        shell.run("pkill -9 -f '[o]pencode' >/dev/null 2>&1; true", settings, timeoutMs = 20_000)
-                    }
-                    process = null
+                if (process === started) process = null
+                if (generation == myGeneration) {
                     _status.value = _status.value.copy(
                         phase = ServerPhase.ERROR,
                         error = "服务启动超时（已清理进程）",
                         hint = "看一下运行日志：常见原因是没配 API Key、内存不足，或者端口被占用",
                     )
-                    return@launch
                 }
+                return
+            }
 
-                val health = health() ?: JSONObject()
+            val health = health(settings.port, settings.serverPassword) ?: JSONObject()
+            if (generation == myGeneration) {
                 _status.value = ServerStatus(
                     phase = ServerPhase.RUNNING,
                     port = settings.port,
@@ -177,9 +214,11 @@ class ServerController(
                     hint = "",
                 )
                 appendLog("✔ 服务已就绪：${baseUrl(settings.port)}（v${_status.value.version}）")
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (generation == myGeneration) {
                 appendLog("✘ 启动失败：${error.message}")
                 _status.value = _status.value.copy(
                     phase = ServerPhase.ERROR,
@@ -187,9 +226,6 @@ class ServerController(
                 )
             }
         }
-        startJob = job
-        job.join()
-        return _status.value.phase == ServerPhase.RUNNING
     }
 
     // ------------------------------------------------------------------ 停止
@@ -197,6 +233,20 @@ class ServerController(
     suspend fun stop(settings: AppSettings) {
         _status.value = _status.value.copy(phase = ServerPhase.STOPPING, hint = "正在停止…")
         appendLog("■ 正在停止服务…")
+
+        // 1) 让进行中的启动作废并退出：否则它会在健康检查失败分支里
+        //    把状态从「已停止」改回 ERROR，还会去清理进程。
+        val pending = lifecycle.withLock {
+            generation += 1
+            startJob
+        }
+        pending?.cancel()
+        pending?.join()
+        startJob = null
+
+        // 2) 收尾：读进程引用并杀（新启动不会被这次清理影响——纪元已经推进）
+        readerJob?.cancel()
+        readerJob = null
         val current = process
         process = null
         if (current != null) {
@@ -262,7 +312,7 @@ class ServerController(
     }
 
     /** 把容器输出搬到日志里。 */
-    private suspend fun pump(target: Process) = withContext(Dispatchers.IO) {
+    private suspend fun pump(myGeneration: Long, target: Process) = withContext(Dispatchers.IO) {
         try {
             val reader = BufferedReader(InputStreamReader(target.inputStream), 64 * 1024)
             while (isActive) {
@@ -272,7 +322,11 @@ class ServerController(
         } catch (_: Exception) {
         } finally {
             val exit = runCatching { target.exitValue() }.getOrDefault(-1)
-            if (_status.value.phase == ServerPhase.RUNNING || _status.value.phase == ServerPhase.STARTING) {
+            // 只对「自己这一轮」负责：restart 时旧进程退出，不能把新一轮的 STARTING 改写成 ERROR
+            val isCurrent = generation == myGeneration && process === target
+            if (isCurrent &&
+                (_status.value.phase == ServerPhase.RUNNING || _status.value.phase == ServerPhase.STARTING)
+            ) {
                 appendLog("⚠ 服务进程结束（exit=$exit）")
                 _status.value = _status.value.copy(
                     phase = ServerPhase.ERROR,
@@ -330,8 +384,16 @@ class ServerController(
          */
         val CLEANUP_COMMAND: String = buildString {
             append("if [ -f /tmp/opencode.pid ]; then ")
-            append("kill -9 \"$(cat /tmp/opencode.pid)\" 2>/dev/null || true; ")
-            append("rm -f /tmp/opencode.pid; fi; ")
+            append("pid=\"\$(cat /tmp/opencode.pid 2>/dev/null)\"; ")
+            // 只杀「确认还是 opencode web」的进程：pid 文件可能陈旧，pid 也可能被系统复用，
+            // 无条件 kill -9 某个号会误伤同 uid 的其它进程（包括 App 自己）。
+            append("case \"\$pid\" in ")
+            append("''|*[!0-9]*) ;; ")
+            append("*) if [ -r \"/proc/\$pid/cmdline\" ] && ")
+            append("tr '\\\\0' ' ' < \"/proc/\$pid/cmdline\" 2>/dev/null | grep -q 'opencode web'; then ")
+            append("kill -9 \"\$pid\" 2>/dev/null || true; fi ;; ")
+            append("esac; rm -f /tmp/opencode.pid; fi; ")
+            // 兜底只保留收窄后的 'opencode web' 模式（见上面注释：宽泛模式会误杀 App）
             append("pkill -9 -f '[o]pencode web' >/dev/null 2>&1 || true; true")
         }
     }

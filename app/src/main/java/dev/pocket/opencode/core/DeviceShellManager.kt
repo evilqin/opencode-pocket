@@ -99,8 +99,11 @@ class DeviceShellManager(
             current?.stop()
             val created = DeviceShellServer(
                 port = config.deviceShellPort,
-                token = token,
-                guard = { command -> if (config.deviceShellGuard) CommandGuard.check(command) else null },
+                // 令牌与防护开关都实时读设置：改完立即生效，不需要重建监听
+                tokenProvider = { settings.settings.value.deviceShellToken },
+                guard = { command ->
+                    if (settings.settings.value.deviceShellGuard) CommandGuard.check(command) else null
+                },
                 onAudit = { line -> audit(line) },
             ) { command, timeout ->
                 runOnDevice(command, timeout)

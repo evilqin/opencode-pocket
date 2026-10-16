@@ -6,8 +6,10 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.io.ByteArrayInputStream
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -196,16 +198,35 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                                         request: WebResourceRequest?,
                                     ): Boolean {
                                         val target = request?.url ?: return false
-                                        val scheme = target.scheme?.lowercase().orEmpty()
-                                        val host = target.host?.lowercase().orEmpty()
-                                        val isLocal = scheme in listOf("http", "https") &&
-                                            host in listOf("127.0.0.1", "localhost", "::1", "[::1]")
-                                        if (isLocal) return false
-                                        // 非本机地址一律交给外部浏览器/系统处理
+                                        // 本机 + 端口就是服务端口：这是我们自己的页面，留在 WebView 里
+                                        if (isServiceUrl(target, server.port)) return false
+                                        // 其余（外网、非 http(s)、以及本机别的端口）一律交给外部浏览器/系统处理。
+                                        // 本机别的端口属于同机其它 App，留在 WebView 里就可能被它的 401 钓走口令
                                         runCatching {
                                             ctx.startActivity(Intent(Intent.ACTION_VIEW, target))
                                         }
                                         return true
+                                    }
+
+                                    override fun shouldInterceptRequest(
+                                        view: WebView?,
+                                        request: WebResourceRequest?,
+                                    ): WebResourceResponse? {
+                                        // 子资源（iframe / img / fetch…）不走 shouldOverrideUrlLoading，
+                                        // 这里再兜一道：指向本机别的端口的请求直接 403，
+                                        // 不给它发 401 挑战的机会（否则口令会被钓走）
+                                        val target = request?.url ?: return null
+                                        if (isLoopbackUrl(target) && target.port != server.port) {
+                                            return WebResourceResponse(
+                                                "text/plain",
+                                                "utf-8",
+                                                403,
+                                                "Blocked",
+                                                emptyMap(),
+                                                ByteArrayInputStream(ByteArray(0)),
+                                            )
+                                        }
+                                        return null
                                     }
 
                                     override fun onReceivedHttpAuthRequest(
@@ -214,9 +235,15 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                                         host: String?,
                                         realm: String?,
                                     ) {
-                                        // 服务带 Basic 口令（OPENCODE_SERVER_PASSWORD）：自动回填，别让用户看到 401
+                                        // 服务带 Basic 口令（OPENCODE_SERVER_PASSWORD）：自动回填，别让用户看到 401。
+                                        // 但只认 host 远远不够：同机任意 App 都能在回环上开端口并回 401+Basic 骗口令，
+                                        // 所以必须同时确认请求来自「当前服务端口」才回填，其余一律取消。
+                                        val requestPort = view?.url
+                                            ?.let { runCatching { Uri.parse(it).port }.getOrDefault(-1) }
+                                            ?: -1
                                         if (password.isNotBlank() &&
-                                            host?.lowercase() in listOf("127.0.0.1", "localhost", "::1")
+                                            isLoopbackHost(host) &&
+                                            requestPort == server.port
                                         ) {
                                             handler?.proceed("opencode", password)
                                         } else {
@@ -267,6 +294,18 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
         }
     }
 }
+
+/** 本机回环主机名（URL 里的 IPv6 回环会带方括号）。 */
+private fun isLoopbackHost(host: String?): Boolean =
+    host?.lowercase() in listOf("127.0.0.1", "localhost", "::1", "[::1]")
+
+/** 是不是指向本机的 http(s) 地址。 */
+private fun isLoopbackUrl(url: Uri): Boolean =
+    url.scheme?.lowercase() in listOf("http", "https") && isLoopbackHost(url.host)
+
+/** 是不是「本机 + 当前服务端口」，也就是我们自己的 opencode 服务。 */
+private fun isServiceUrl(url: Uri, servicePort: Int): Boolean =
+    isLoopbackUrl(url) && url.port == servicePort
 
 private const val MOBILE_TWEAKS = """
 (function() {

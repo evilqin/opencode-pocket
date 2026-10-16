@@ -40,8 +40,18 @@ case "$TIMEOUT" in
     ''|*[!0-9]*) TIMEOUT=60 ;;
 esac
 
+# 令牌不经过命令行参数：容器里任何进程都能看 /proc 下的 argv，
+# 改用 0600 的临时头文件传给 curl（-H @文件，curl 7.55+）
+HDRFILE="$(mktemp /tmp/dexec-hdr.XXXXXX 2>/dev/null)" || {
+    echo "dexec: 无法创建临时文件（/tmp 不可写）" >&2
+    exit 2
+}
+chmod 600 "$HDRFILE" 2>/dev/null
+trap 'rm -f "$HDRFILE"' EXIT
+printf 'Authorization: Bearer %s\n' "$token" > "$HDRFILE"
+
 curl -sS --max-time "$((TIMEOUT + 15))" --fail-with-body \
-    -H "Authorization: Bearer $token" \
+    -H @"$HDRFILE" \
     -H "Content-Type: text/plain; charset=utf-8" \
     -H "X-Dexec-Timeout-Ms: $((TIMEOUT * 1000))" \
     -H "Expect:" \

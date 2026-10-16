@@ -257,7 +257,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                 InlineBanner(
                     icon = Icons.Filled.Warning,
                     title = "存储空间可能不够",
-                    body = "完整环境（Ubuntu + OpenCode）大约需要 1.5 GB，当前可用 ${Format.bytes(engine.installer.freeSpaceBytes())}",
+                    body = "完整环境（Ubuntu + OpenCode）大约需要 1.5 GB，建议预留 2 GB；当前可用 ${Format.bytes(engine.installer.freeSpaceBytes())}",
                     tone = PocketColors.Rose,
                 )
             }

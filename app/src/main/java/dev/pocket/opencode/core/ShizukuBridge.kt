@@ -63,11 +63,18 @@ class ShizukuBridge(private val context: Context) {
         available() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
     }.getOrDefault(false)
 
-    /** 已经拒绝并且勾了「不再询问」。
-     *  注意 Shizuku 的这个 API 语义与 Android 的相反：true = 用户选过「拒绝且不再询问」。 */
-    fun deniedForever(): Boolean = runCatching {
-        available() && Shizuku.shouldShowRequestPermissionRationale()
+    /** 需要用户去 Shizuku 里手动授权：Shizuku 在跑但权限没拿到。
+     *
+     *  为什么不用「永久拒绝」：Shizuku 没有可靠的永久拒绝判断
+     *  （`shouldShowRequestPermissionRationale()` 的语义与 Android 相反，且各版本行为不一致），
+     *  所以这里只保守地表达「需要手动授权」，不去断言用户已永久拒绝。 */
+    fun needsManualGrant(): Boolean = runCatching {
+        available() && !permissionGranted()
     }.getOrDefault(false)
+
+    /** 旧名，语义不可靠（见 [needsManualGrant]）。保留以免调用方编译失败，请改用 [needsManualGrant]。 */
+    @Deprecated("语义不可靠，请改用 needsManualGrant()", ReplaceWith("needsManualGrant()"))
+    fun deniedForever(): Boolean = needsManualGrant()
 
     fun requestPermission(requestCode: Int) {
         runCatching { Shizuku.requestPermission(requestCode) }
@@ -85,9 +92,21 @@ class ShizukuBridge(private val context: Context) {
 
     /** 绑定 Shizuku 用户服务（幂等、可并发调用）。返回是否可用。 */
     suspend fun connect(timeoutMs: Long = 8_000): Boolean = connectLock.withLock {
-        if (service != null) return@withLock true
-        if (!permissionGranted()) return@withLock false
+        // 已有服务也要复核权限：权限可能在使用过程中被撤销。
+        val granted = permissionGranted()
+        if (service != null && granted) return@withLock true
+        if (!granted) {
+            // 权限不在了：清掉可能已失效的连接，避免留下悬挂引用。
+            if (service != null) disconnect()
+            return@withLock false
+        }
         withContext(Dispatchers.IO) {
+            // 重新绑定前先解绑旧连接，防止 ServiceConnection 泄漏。
+            connection?.let { old -> runCatching { Shizuku.unbindUserService(serviceArgs(), old, true) } }
+            connection = null
+            service = null
+            uid = null
+
             val serviceConnection = object : ServiceConnection {
                 override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                     val stub = binder?.let { IDeviceShellService.Stub.asInterface(it) }
@@ -149,7 +168,10 @@ class ShizukuBridge(private val context: Context) {
             ?: return@withContext Result(-1, "", "Shizuku 用户服务未连接")
         val raw = try {
             target.exec(command, timeoutMs.toInt())
-        } catch (error: Throwable) {
+        } catch (cancel: kotlinx.coroutines.CancellationException) {
+            // 协程取消要原样抛出，不能被下面的兜底吞掉。
+            throw cancel
+        } catch (error: Exception) {
             // binder 可能掉了：清掉引用，下一次调用重新绑定
             service = null
             uid = null

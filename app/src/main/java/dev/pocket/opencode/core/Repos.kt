@@ -63,12 +63,17 @@ class Repos(private val downloads: Downloader) {
                 sha256 = ubuntuSha256(mirror, fileName),
             )
         }
-        for (version in ubuntuFallbackVersions) {
-            val fallback = "ubuntu-base-$version-base-arm64.tar.gz"
+        // 目录列表不可用：先从 SHA256SUMS 里发现（上游发新版也能找到），再退回写死的版本号探测
+        val sums = runCatching { httpGetText(mirror.base + "/SHA256SUMS") }.getOrNull()
+        val discovered = sums?.let { UpstreamParsers.ubuntuBaseCandidates(it) }.orEmpty()
+        val probes = ubuntuFallbackVersions.map { "ubuntu-base-$it-base-arm64.tar.gz" }
+        for (fallback in (discovered + probes).distinct()) {
             val url = mirror.base + "/" + fallback
             val size = sizeOf(url)
             if (size > 0) {
-                return@withContext Artifact(url, fallback, version, size, ubuntuSha256(mirror, fallback))
+                val version = Regex("ubuntu-base-(\\d+\\.\\d+\\.\\d+)-").find(fallback)?.groupValues?.get(1) ?: ""
+                val digest = sums?.let { UpstreamParsers.sha256For(fallback, it) } ?: ubuntuSha256(mirror, fallback)
+                return@withContext Artifact(url, fallback, version, size, digest)
             }
         }
         throw IllegalStateException("镜像 ${mirror.name} 上找不到 ubuntu-base 24.04 arm64")

@@ -44,7 +44,10 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -61,6 +64,7 @@ import dev.pocket.opencode.ui.components.copyToClipboard
 import dev.pocket.opencode.ui.theme.CodeTextStyle
 import dev.pocket.opencode.ui.theme.PocketColors
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
  * 终端页：一个「类 shell」的命令执行器 + 两份日志。
@@ -68,7 +72,7 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun TerminalScreen(engine: PocketEngine) {
-    var tab by remember { mutableIntStateOf(0) }
+    var tab by rememberSaveable { mutableIntStateOf(0) }
     val install by engine.installer.state.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = tab) {
@@ -104,14 +108,56 @@ private sealed interface TermLine {
 
 private const val MAX_TERMINAL_LINES = 800
 private const val MAX_LOG_LINES = 1200
+private const val MAX_SAVED_TERMINAL_LINES = 50
+
+/** 把终端行序列化成 JSON 字符串，用于进程重建时恢复；只存最近 50 条防止 Bundle 超限。 */
+private fun TermLine.serialize(): String = when (this) {
+    is TermLine.Prompt -> """{"t":"P","c":${jsonQuote(cwd)},"d":${jsonQuote(command)}}"""
+    is TermLine.Output -> """{"t":"O","d":${jsonQuote(text)}}"""
+    is TermLine.Note -> """{"t":"N","d":${jsonQuote(text)},"e":$error}"""
+}
+
+private fun String.toTermLine(): TermLine? = runCatching {
+    val json = JSONObject(this)
+    when (json.getString("t")) {
+        "P" -> TermLine.Prompt(json.getString("c"), json.getString("d"))
+        "O" -> TermLine.Output(json.getString("d"))
+        "N" -> TermLine.Note(json.getString("d"), json.getBoolean("e"))
+        else -> null
+    }
+}.getOrNull()
+
+private fun jsonQuote(s: String): String {
+    val sb = StringBuilder(s.length + 2).append('"')
+    for (c in s) {
+        when (c) {
+            '\\' -> sb.append("\\\\")
+            '"' -> sb.append("\\\"")
+            '\n' -> sb.append("\\n")
+            '\r' -> sb.append("\\r")
+            '\t' -> sb.append("\\t")
+            else -> if (c.code < 0x20) sb.append(String.format("\\u%04x", c.code)) else sb.append(c)
+        }
+    }
+    return sb.append('"').toString()
+}
+
+private val TermLineListSaver = listSaver<SnapshotStateList<TermLine>, String>(
+    save = { it.takeLast(MAX_SAVED_TERMINAL_LINES).map { line -> line.serialize() } },
+    restore = { saved ->
+        mutableStateListOf<TermLine>().apply {
+            addAll(saved.mapNotNull { it.toTermLine() })
+        }
+    },
+)
 
 @Composable
 private fun CommandRunner(engine: PocketEngine) {
     val scope = rememberCoroutineScope()
     val settings by engine.settings.settings.collectAsStateWithLifecycle()
-    val lines = remember { mutableStateListOf<TermLine>() }
-    var input by remember { mutableStateOf("") }
-    var cwd by remember { mutableStateOf("/root/workspace") }
+    val lines = rememberSaveable(saver = TermLineListSaver) { mutableStateListOf<TermLine>() }
+    var input by rememberSaveable { mutableStateOf("") }
+    var cwd by rememberSaveable { mutableStateOf("/root/workspace") }
     var busy by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 

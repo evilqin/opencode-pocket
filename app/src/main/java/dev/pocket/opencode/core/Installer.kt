@@ -3,6 +3,7 @@ package dev.pocket.opencode.core
 import android.content.Context
 import android.system.Os
 import java.io.File
+import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -205,7 +206,7 @@ class Installer(
     /** 完整环境大约占 1.2~1.8 GB，留 2 GB 比较稳妥。 */
     fun hasEnoughSpace(): Boolean {
         val free = freeSpaceBytes()
-        return free < 0 || free > 2L * 1024 * 1024 * 1024
+        return free < 0 || free >= MIN_FREE_BYTES
     }
 
     /** 删除容器环境。调用方负责先停服务。 */
@@ -269,7 +270,7 @@ class Installer(
     }
 
     private suspend fun stepRootfs(config: AppSettings): String {
-        // 峰值用量：下载包 + 新 rootfs + 旧 rootfs 同时存在，1.2 GB 是个务实下限
+        // 用与「一键安装」相同的阈值：单独重跑这一步也得留够后续步骤所需的峰值空间
         val free = freeSpaceBytes()
         if (free > 0 && free < MIN_FREE_BYTES) {
             throw IllegalStateException(
@@ -603,6 +604,9 @@ class Installer(
     private fun writeGuestFile(guestPath: String, content: String, mode: Int) {
         val file = File(paths.rootfs, guestPath.trimStart('/'))
         file.parentFile?.mkdirs()
+        // 路径上任何一级是软链都可能把内容写到 rootfs 外（先删链接再写）
+        FileOps.ensureNoSymlinkPath(paths.rootfs, file)
+        file.parentFile?.mkdirs()
         file.writeText(content)
         runCatching { Os.chmod(file.absolutePath, mode) }
     }
@@ -630,7 +634,13 @@ class Installer(
         if (!log.isFile || log.length() < MAX_LOG_BYTES) return
         val backup = File(log.parentFile, log.name + ".1")
         backup.delete()
-        log.renameTo(backup)
+        if (log.renameTo(backup)) return
+        // 有些文件系统上 rename 会失败：退化成复制 + 截断（与 server.log 的轮转逻辑一致）
+        runCatching {
+            backup.delete()
+            log.copyTo(backup, overwrite = true)
+            RandomAccessFile(log, "rw").use { it.setLength(0) }
+        }
     }
 
     private fun markRunning(step: InstallStep) {
@@ -757,6 +767,7 @@ class Installer(
         target.parentFile?.mkdirs()
 
         var count = 0
+        var failure: String? = null
         try {
             java.io.FileOutputStream(target).use { output ->
                 val seen = HashSet<String>()
@@ -772,13 +783,17 @@ class Installer(
                 }
             }
         } catch (error: Exception) {
-            log("注入系统 CA 失败：${error.message}")
-        }
-        if (count == 0) {
+            failure = error.message
+            // 半截的 bundle 比没有更危险：大小可能已过阈值，后续会以为「证书已注入」
             target.delete()
-            log("系统 CA 目录里没有可用的证书，apt 将退回 http 源")
-        } else {
-            log("已注入系统 CA 证书 $count 张（${target.length() / 1024} KB）")
+        }
+        when {
+            failure != null -> log("注入系统 CA 失败（$failure）：https 的 apt 源会不可用，可重跑本步骤")
+            count == 0 -> {
+                target.delete()
+                log("系统 CA 目录里没有可用的证书：https 的 apt 源会不可用，可重跑本步骤")
+            }
+            else -> log("已注入系统 CA 证书 $count 张（${target.length() / 1024} KB）")
         }
     }
 
@@ -786,7 +801,7 @@ class Installer(
         const val MAX_LOG_LINES = 600
         const val MAX_LOG_BYTES = 2L shl 20 // 2 MiB
 
-        /** 安装期间的最小空闲空间（下载包 + 新 rootfs + 旧 rootfs 的峰值）。 */
-        const val MIN_FREE_BYTES = 1200L * 1024 * 1024
+        /** 安装/重装任一环境步骤所需的最小空闲空间（下载包 + 新 rootfs + 旧 rootfs + 工具链的峰值）。 */
+        const val MIN_FREE_BYTES = 2L * 1024 * 1024 * 1024
     }
 }

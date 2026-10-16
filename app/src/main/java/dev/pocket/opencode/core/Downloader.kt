@@ -61,7 +61,8 @@ class Downloader(context: Context) {
         isCanceled: () -> Boolean = { false },
         onProgress: (Progress) -> Unit = {},
     ): File = withContext(Dispatchers.IO) {
-        val part = File(target.parentFile, target.name + ".part")
+        // .part 与来源 URL 绑定：换镜像时绝不会续用别的源的半成品（曾经会拼出损坏文件）
+        val part = partFile(target, url)
         target.parentFile?.mkdirs()
 
         // 已有且摘要正确的文件直接复用：重试/换镜像/重装都不用重下几十 MB
@@ -79,6 +80,7 @@ class Downloader(context: Context) {
             attempt++
             try {
                 downloadOnce(url, part, target, expected, onProgress, isCanceled)
+                clearParts(target)
                 return@withContext target
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -104,11 +106,9 @@ class Downloader(context: Context) {
         var lastError: Exception? = null
         for ((index, url) in urls.withIndex()) {
             try {
-                // 换源时旧的半成品没意义
-                if (index > 0) {
-                    File(target.parentFile, target.name + ".part").delete()
-                    target.delete()
-                }
+                // 换源时把别的来源留下的半成品清掉（本来源的 .part 是按 URL 命名的，不会被误用）
+                clearParts(target, keepUrl = url)
+                if (index > 0) target.delete()
                 return fetch(url, target, expected, isCanceled, onProgress)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -193,6 +193,11 @@ class Downloader(context: Context) {
             if (total > 0 && part.length() < total) {
                 throw IOException("连接提前中断（${part.length()}/$total）")
             }
+            if (total < 0 && expected == null) {
+                // 既没有长度也没有摘要：无法证明文件完整，宁可不收尾。
+                // .part 保留着，重试时带 Range 通常能拿到 206 + Content-Length，从而走上面的长度校验。
+                throw IOException("服务器未提供内容长度且没有可用的校验和，无法确认下载完整")
+            }
             if (expected != null) {
                 // 校验失败时删掉半成品，避免下次误用
                 val actual = digestOf(part, expected.algorithm)
@@ -230,6 +235,33 @@ class Downloader(context: Context) {
 
     companion object {
         const val USER_AGENT = "OpenCodePocket/1.0 (Android)"
+
+        /** .part 文件按来源 URL 命名：换镜像不会续用别的源的半成品。 */
+        fun partFile(target: File, url: String): File =
+            File(target.parentFile, target.name + "." + urlTag(url) + ".part")
+
+        /**
+         * 清掉目标文件的所有残留 .part（可保留某个来源的）。
+         * 只匹配「target.name.<10 位十六进制>.part」与旧格式「target.name.part」，避免误删同前缀的别的目标。
+         */
+        fun clearParts(target: File, keepUrl: String? = null) {
+            val dir = target.parentFile ?: return
+            val keep = keepUrl?.let { partFile(target, it).name }
+            val prefix = target.name + "."
+            dir.listFiles()?.forEach { file ->
+                val name = file.name
+                if (!name.endsWith(".part") || !name.startsWith(prefix) || name == keep) return@forEach
+                val rest = name.removePrefix(prefix)
+                val middle = rest.removeSuffix(".part")
+                val known = rest == "part" ||
+                    (rest.endsWith(".part") && middle.length == 10 && middle.all { it in "0123456789abcdef" })
+                if (known) file.delete()
+            }
+        }
+
+        private fun urlTag(url: String): String =
+            MessageDigest.getInstance("SHA-1").digest(url.toByteArray(Charsets.UTF_8))
+                .take(5).joinToString("") { "%02x".format(it) }
 
         fun digestOf(file: File, algorithm: String): String {
             val digest = MessageDigest.getInstance(algorithm)

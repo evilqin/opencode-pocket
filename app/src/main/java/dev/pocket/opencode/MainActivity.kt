@@ -63,7 +63,17 @@ class MainActivity : ComponentActivity() {
         handleShortcutIntent(intent, (application as PocketApp).engine)
     }
 
-    /** 桌面快捷方式（长按图标）进来的意图：启动服务 / 打开网页。 */
+    /**
+     * 桌面快捷方式（长按图标）进来的意图：启动服务 / 打开网页。
+     *
+     * 安全取舍（P2，低危，已评估后保持原行为）：
+     * 这两个自定义 action 由**系统桌面**按 res/xml/shortcuts.xml 里的静态快捷方式构造 Intent
+     * 发出，XML 里的东西是公开的，我们没法塞一个「只有本应用知道的 token」进去校验；
+     * 而 MainActivity 是 LAUNCHER，exported 必须为 true，所以同机任意 App 显式指定组件时
+     * 也能发出这两个 action（无法可靠区分来源）。
+     * 影响面有限：START_SERVICE 只是启动用户本来就装着的服务，OPEN_WEB 只是把界面切到网页页，
+     * 都不回传数据、不碰口令。真要收紧只能放弃静态快捷方式，改成自己用 PendingIntent 带 token 发。
+     */
     private fun handleShortcutIntent(intent: Intent?, engine: PocketEngine) {
         when (intent?.action) {
             ACTION_START_SERVICE -> engine.startServer()

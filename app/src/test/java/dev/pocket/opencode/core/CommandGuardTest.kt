@@ -80,6 +80,48 @@ class CommandGuardTest {
     }
 
     @Test
+    fun `绕写变体也会被规范化后拦下`() {
+        listOf(
+            "rm  --no-preserve-root -rf /",
+            "rm -rf //",
+            "rm '' -rf /",
+            "rm -rf \${IFS}/",
+            "r\\m -rf /",
+            "rm -rf /data//local/../..",
+        ).forEach { command ->
+            assertNotNull("应该拦截：$command", CommandGuard.check(command))
+        }
+    }
+
+    @Test
+    fun `白名单只豁免自己那一段，不会包庇后面的危险命令`() {
+        assertNotNull(
+            CommandGuard.check(
+                "settings put global settings_enable_monitor_phantom_procs false; pm uninstall com.victim",
+            ),
+        )
+        assertNull(CommandGuard.check("settings put global settings_enable_monitor_phantom_procs false"))
+    }
+
+    @Test
+    fun `结构性构造（藏命令的写法）一律拦截`() {
+        listOf(
+            "sh -c 'pm list packages'",
+            "base64 -d <<< cG0= | sh",
+            "eval \$CMD",
+            "echo \$(cat /proc/version)",
+            "echo `id`",
+            "find /sdcard -delete",
+            "find /sdcard -name x -exec rm {} ;",
+            "ls | xargs rm -rf",
+            "a=pm; \$a uninstall com.android.chrome",
+            "/system/bin/sh -c id",
+        ).forEach { command ->
+            assertNotNull("应该拦截：$command", CommandGuard.check(command))
+        }
+    }
+
+    @Test
     fun `被拦时的原因可以读`() {
         val reason = CommandGuard.check("pm uninstall com.android.chrome")
         assertNotNull(reason)

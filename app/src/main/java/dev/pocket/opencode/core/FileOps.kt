@@ -33,6 +33,25 @@ object FileOps {
     }
 
     /**
+     * 从 [root] 到 [target] 的每一级路径都确保不是符号链接（是则删掉）。
+     *
+     * 用于 App 自己往 rootfs 写文件时（resolv.conf、配置、脚本）：
+     * 只清叶子不够——父目录若被换成软链，写入照样跑到树外。
+     * rootfs 里我们写的那几个位置（/etc、/root/.config…）本来不该是软链，
+     * 被替换成软链只可能是被投毒或上游换了布局，删掉重建是安全做法。
+     */
+    fun ensureNoSymlinkPath(root: File, target: File) {
+        val rootPath = root.absolutePath.trimEnd('/')
+        var current: File? = target
+        while (current != null) {
+            val path = current.absolutePath
+            if (path == rootPath || !path.startsWith("$rootPath/")) break
+            clearIfSymlink(current)
+            current = current.parentFile
+        }
+    }
+
+    /**
      * 交换目录：把 [newDir] 换到 [target]，旧目录改名为 `<target>.old` 保留。
      *
      * @return 备份目录（可能不存在），调用方在自检通过后调用 [finishSwap] 删除，

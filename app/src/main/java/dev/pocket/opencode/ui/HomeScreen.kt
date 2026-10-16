@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -75,6 +76,7 @@ fun HomeScreen(
     val settings by engine.settings.settings.collectAsStateWithLifecycle()
     var showDoctor by remember { mutableStateOf(false) }
 
+    var showStopConfirm by remember { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     // 只在服务运行时每秒刷新「已运行时长」；其他状态下不要白白重组整个首页
     LaunchedEffect(server.phase) {
@@ -141,7 +143,7 @@ fun HomeScreen(
                 Spacer(Modifier.height(18.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (server.phase == ServerPhase.RUNNING) {
-                        Button(onClick = { engine.stopServer() }) {
+                        Button(onClick = { showStopConfirm = true }) {
                             Icon(PocketIcons.Stop, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text("停止")
@@ -359,6 +361,23 @@ fun HomeScreen(
 
     if (showDoctor) {
         DoctorDialog(engine) { showDoctor = false }
+    }
+
+    if (showStopConfirm) {
+        AlertDialog(
+            onDismissRequest = { showStopConfirm = false },
+            title = { Text("停止服务？") },
+            text = { Text("这会中断正在运行的会话与任务，网页版和终端都需要重新连接。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showStopConfirm = false
+                        engine.stopServer()
+                    },
+                ) { Text("停止") }
+            },
+            dismissButton = { TextButton(onClick = { showStopConfirm = false }) { Text("取消") } },
+        )
     }
 }
 

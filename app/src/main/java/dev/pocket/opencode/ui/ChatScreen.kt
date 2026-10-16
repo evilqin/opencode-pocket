@@ -1,9 +1,11 @@
 package dev.pocket.opencode.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,11 +51,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
@@ -94,7 +98,24 @@ import org.json.JSONObject
 @Composable
 fun ChatScreen(engine: PocketEngine, onOpenSettings: () -> Unit) {
     val server by engine.server.status.collectAsStateWithLifecycle()
-    var selected by remember { mutableStateOf<SessionInfo?>(null) }
+    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
+    var restored by remember { mutableStateOf<SessionInfo?>(null) }
+
+    // 进程重建后通过会话 ID 恢复选中；若找不到该 ID 就回退到列表
+    LaunchedEffect(selectedId, server.phase) {
+        if (server.phase != ServerPhase.RUNNING) return@LaunchedEffect
+        if (selectedId == null) {
+            restored = null
+            return@LaunchedEffect
+        }
+        if (restored?.id == selectedId) return@LaunchedEffect
+        restored = try {
+            engine.api.sessions().find { it.id == selectedId }
+        } catch (_: Exception) {
+            null
+        }
+        if (restored == null) selectedId = null
+    }
 
     when {
         server.phase != ServerPhase.RUNNING -> EmptyState(
@@ -104,16 +125,29 @@ fun ChatScreen(engine: PocketEngine, onOpenSettings: () -> Unit) {
             action = { Button(onClick = { engine.startServer() }) { Text("启动服务") } },
         )
 
-        selected == null -> SessionList(
+        selectedId != null && restored == null -> Box(
+            Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(Modifier.size(28.dp))
+        }
+
+        restored != null -> SessionDetail(
             engine = engine,
-            onOpen = { selected = it },
-            onOpenSettings = onOpenSettings,
+            session = restored!!,
+            onBack = {
+                selectedId = null
+                restored = null
+            },
         )
 
-        else -> SessionDetail(
+        else -> SessionList(
             engine = engine,
-            session = selected!!,
-            onBack = { selected = null },
+            onOpen = {
+                selectedId = it.id
+                restored = it
+            },
+            onOpenSettings = onOpenSettings,
         )
     }
 }
@@ -559,9 +593,13 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
     val scope = rememberCoroutineScope()
     val chat = remember(session.id) { ChatState(engine, session) }
     val listState = rememberLazyListState()
-    var input by remember { mutableStateOf("") }
+    var input by rememberSaveable(session.id) { mutableStateOf("") }
     var showModelPicker by remember { mutableStateOf(false) }
     var showRename by remember { mutableStateOf(false) }
+
+    BackHandler {
+        onBack()
+    }
 
     LaunchedEffect(session.id) { chat.load() }
 
@@ -582,9 +620,17 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
         if (chat.showDiffs && !chat.busy) chat.loadDiff()
     }
 
-    LaunchedEffect(chat.messages.size, chat.permissions.size, chat.busy) {
+    // 用户手动上翻时不要被新消息强行拉回底部
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            last == null || last.index >= info.totalItemsCount - 2
+        }
+    }
+    LaunchedEffect(chat.messages.size, chat.permissions.size, chat.busy, atBottom) {
         val total = chat.messages.size + chat.permissions.size + if (chat.busy) 1 else 0
-        if (total > 0) listState.animateScrollToItem(total - 1)
+        if (total > 0 && atBottom) listState.animateScrollToItem(total - 1)
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -860,14 +906,20 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
 private fun MessageBubble(message: ChatMessage) {
     val context = LocalContext.current
     if (message.info.isUser) {
+        val userText = message.parts.filterIsInstance<Part.Text>().joinToString("\n") { it.text }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer,
                 shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
-                modifier = Modifier.fillMaxWidth(0.88f),
+                modifier = Modifier
+                    .fillMaxWidth(0.88f)
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = { copyToClipboard(context, userText, "已复制") },
+                    ),
             ) {
                 Text(
-                    message.parts.filterIsInstance<Part.Text>().joinToString("\n") { it.text },
+                    userText,
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onPrimaryContainer,
                     modifier = Modifier.padding(14.dp),
@@ -912,7 +964,13 @@ private fun MessageBubble(message: ChatMessage) {
             message.parts.forEach { part ->
                 when (part) {
                     is Part.Text -> if (part.text.isNotBlank() && !part.synthetic) {
-                        MarkdownText(part.text)
+                        MarkdownText(
+                            part.text,
+                            modifier = Modifier.combinedClickable(
+                                onClick = {},
+                                onLongClick = { copyToClipboard(context, part.text, "已复制") },
+                            ),
+                        )
                     }
 
                     is Part.Reasoning -> if (part.text.isNotBlank()) {

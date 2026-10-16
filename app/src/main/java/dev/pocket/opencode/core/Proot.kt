@@ -65,7 +65,14 @@ class Proot(
         }
         // 路径必须过策略校验：绝不允许把 / 或 /data 这种目录当工作区挂进去
         val normalized = WorkspacePolicy.normalize(config.workspace)
-        val host = File(normalized)
+        // 再解析软链 / `.` / `..`：字符串看起来合法的路径，真实落点可能是别的目录，
+        // 解析不出来（或解析完不合法）就退回内部工作区
+        val canonical = WorkspacePolicy.canonicalize(normalized)
+        if (canonical == null) {
+            paths.internalWorkspace.mkdirs()
+            return Workspace(paths.internalWorkspace, PocketPaths.Guest.WORKSPACE, false)
+        }
+        val host = File(canonical)
         // canWrite 在 Android 的 FUSE 上会撒谎：真的建个临时文件试试
         val usable = (host.isDirectory || host.mkdirs()) && FileOps.canReallyWrite(host)
         if (!usable) {

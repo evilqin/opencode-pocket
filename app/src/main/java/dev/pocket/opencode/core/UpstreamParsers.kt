@@ -47,6 +47,22 @@ object UpstreamParsers {
     }
 
     /**
+     * 目录列表不可用时的候选文件名：从 `SHA256SUMS` 里找出所有 arm64 rootfs，按版本从新到旧。
+     *
+     * 比写死版本号抗上游更新——镜像把每个点版本都列在 SHA256SUMS 里，
+     * 上游发了 24.04.7 之后回退列表也不会「一个都找不到」。
+     */
+    fun ubuntuBaseCandidates(shasumsText: String): List<String> {
+        val pattern = Regex("ubuntu-base-(\\d+\\.\\d+\\.\\d+)-base-arm64\\.tar\\.gz")
+        return pattern.findAll(shasumsText)
+            .map { it.groupValues[1] to it.value }
+            .distinctBy { it.second }
+            .sortedByDescending { Versions.score(it.first) }
+            .map { it.second }
+            .toList()
+    }
+
+    /**
      * 从 `SHA256SUMS` / `SHASUMS256.txt` 这类文本里取出指定文件的摘要。
      * 行格式：`<hex>  <filename>` 或 `<hex> *<filename>`。
      */

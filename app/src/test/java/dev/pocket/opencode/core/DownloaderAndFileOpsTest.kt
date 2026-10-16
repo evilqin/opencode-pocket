@@ -46,6 +46,60 @@ class DownloaderAndFileOpsTest {
         assertEquals("ABC", Downloader.ExpectedHash.sha256("ABC")!!.hex)
     }
 
+    // ----------------------------------------------------------------- 断点续传的 part 文件
+
+    @Test
+    fun `part 文件名带来源标签且对同一 URL 稳定`() {
+        val target = File(temp.newFolder("parts"), "ubuntu-base.tar.gz")
+        val a = Downloader.partFile(target, "https://mirror-a.example/ubuntu-base.tar.gz")
+        val aAgain = Downloader.partFile(target, "https://mirror-a.example/ubuntu-base.tar.gz")
+        val b = Downloader.partFile(target, "https://mirror-b.example/ubuntu-base.tar.gz")
+
+        assertEquals("同一 URL 应得到同一个 part 文件", a.name, aAgain.name)
+        assertFalse("不同镜像不能共用 part 文件", a.name == b.name)
+        assertTrue("前缀应来自目标文件名：${a.name}", a.name.startsWith("ubuntu-base.tar.gz."))
+        assertTrue("应以 .part 结尾：${a.name}", a.name.endsWith(".part"))
+        assertTrue(
+            "来源标签应是 10 位十六进制：${a.name}",
+            Regex("""^ubuntu-base\.tar\.gz\.[0-9a-f]{10}\.part$""").matches(a.name),
+        )
+    }
+
+    @Test
+    fun `clearParts 清掉同一目标的续传分片但保留其它目标`() {
+        val dir = temp.newFolder("parts-clear")
+        val target = File(dir, "node.tar.xz")
+        val other = File(dir, "opencode.tgz")
+
+        val leftoverOld = File(dir, "node.tar.xz.part").apply { writeText("old-style") }
+        val partA = Downloader.partFile(target, "https://a.example/node.tar.xz").apply { writeText("a") }
+        val partB = Downloader.partFile(target, "https://b.example/node.tar.xz").apply { writeText("b") }
+        val otherPart = Downloader.partFile(other, "https://a.example/opencode.tgz").apply { writeText("other") }
+        val normal = File(dir, "node.tar.xz.backup").apply { writeText("keep") }
+
+        Downloader.clearParts(target)
+
+        assertFalse("旧式 .part 也要清掉", leftoverOld.exists())
+        assertFalse(partA.exists())
+        assertFalse(partB.exists())
+        assertTrue("别的目标的 part 不能误删", otherPart.exists())
+        assertTrue("普通文件不能误删", normal.exists())
+    }
+
+    @Test
+    fun `clearParts 能只保留指定来源的 part`() {
+        val dir = temp.newFolder("parts-keep")
+        val target = File(dir, "opencode.tgz")
+        val keepUrl = "https://keep.example/opencode.tgz"
+        val keep = Downloader.partFile(target, keepUrl).apply { writeText("half") }
+        val drop = Downloader.partFile(target, "https://drop.example/opencode.tgz").apply { writeText("stale") }
+
+        Downloader.clearParts(target, keepUrl = keepUrl)
+
+        assertTrue("正在续传的来源必须保留", keep.exists())
+        assertFalse("其它来源的分片要清掉", drop.exists())
+    }
+
     // ----------------------------------------------------------------- 文件
 
     @Test

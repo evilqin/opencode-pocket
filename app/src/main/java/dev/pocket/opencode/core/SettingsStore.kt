@@ -106,12 +106,12 @@ class SettingsStore(private val context: Context) {
     suspend fun snapshot(): AppSettings = parse(store.data.first()[key])
 
     suspend fun update(transform: (AppSettings) -> AppSettings) {
-        var updated = AppSettings()
         store.edit { prefs ->
-            updated = transform(parse(prefs[key]))
-            prefs[key] = SettingsCodec.encode(updated)
+            prefs[key] = SettingsCodec.encode(transform(parse(prefs[key])))
         }
-        _settings.value = updated
+        // 以磁盘为准刷新内存快照：并发 update 时，edit 内部的 transform 是基于最新值，
+        // 不能再用「本协程算出的 updated」去覆盖，否则会写回旧快照。
+        _settings.value = snapshot()
     }
 
     /**
@@ -121,15 +121,28 @@ class SettingsStore(private val context: Context) {
      * opencode 服务若不带口令，任何 App 都能驱动我们的 agent。
      */
     suspend fun ensureServerPassword(): String {
-        val existing = snapshot().serverPassword
-        if (existing.length >= 16) return existing
-        val generated = java.security.SecureRandom().let { random ->
-            val bytes = ByteArray(24)
-            random.nextBytes(bytes)
-            bytes.joinToString("") { "%02x".format(it) }
+        var password = ""
+        // 「读-判-生成-写」全放进同一次 edit：DataStore 的 edit 是原子的，
+        // 并发调用只会有一个真正生成，不会各写各的口令。
+        store.edit { prefs ->
+            val current = parse(prefs[key])
+            val existing = current.serverPassword
+            if (existing.isBlank()) {
+                // 只有当口令「为空/空白」时才生成；用户自定义的短口令不再被静默重置。
+                password = generateServerPassword()
+                prefs[key] = SettingsCodec.encode(current.copy(serverPassword = password))
+            } else {
+                password = existing
+            }
         }
-        update { it.copy(serverPassword = generated) }
-        return generated
+        _settings.value = snapshot()
+        return password
+    }
+
+    private fun generateServerPassword(): String {
+        val bytes = ByteArray(24)
+        java.security.SecureRandom().nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 
     private fun parse(raw: String?): AppSettings = SettingsCodec.decode(raw)

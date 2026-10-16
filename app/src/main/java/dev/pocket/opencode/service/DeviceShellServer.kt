@@ -35,7 +35,11 @@ import org.json.JSONObject
  */
 class DeviceShellServer(
     private val port: Int,
-    private val token: String,
+    /**
+     * 令牌提供者：每个请求实时读取（用户「重新生成令牌」后立即生效，
+     * 不需要重建监听；旧实现把 token 钉死在构造参数里，换令牌后一直 401）。
+     */
+    private val tokenProvider: () -> String,
     /** 危险命令防护：返回非 null 表示拒绝执行（原因给 agent 看）。 */
     private val guard: (String) -> String? = { null },
     /** 每次执行（含被拦）都回调一行审计文本。 */
@@ -52,11 +56,11 @@ class DeviceShellServer(
     private var workers = newWorkerPool()
 
     private fun newWorkerPool() = ThreadPoolExecutor(
-        2,
         4,
+        16,
         30,
         TimeUnit.SECONDS,
-        ArrayBlockingQueue(16),
+        ArrayBlockingQueue(32),
         { runnable -> Thread(runnable, "device-shell-bridge").apply { isDaemon = true } },
         ThreadPoolExecutor.AbortPolicy(),
     )
@@ -86,6 +90,8 @@ class DeviceShellServer(
                 } catch (_: SocketException) {
                     break
                 } catch (_: Exception) {
+                    // 偶发错误不要忙等：让出一点 CPU 再 accept，避免失败风暴打满一个核
+                    runCatching { Thread.sleep(50) }
                     continue
                 }
                 try {
@@ -109,10 +115,15 @@ class DeviceShellServer(
 
     private fun handle(socket: Socket) {
         socket.use { client ->
-            client.soTimeout = 15_000
+            // 头部阶段用较短超时：慢速连接不能长时间占着池线程；读 body 时再放宽
+            client.soTimeout = HEADER_TIMEOUT_MS
             val input = client.getInputStream()
 
-            val requestLine = readLine(input) ?: return
+            val requestLine = try {
+                readLine(input) ?: return
+            } catch (_: HeaderTooLongException) {
+                return respond(client, 431, "text/plain", "request line too long")
+            }
             val parts = requestLine.split(' ')
             if (parts.size < 2) return respond(client, 400, "text/plain", "bad request")
             val method = parts[0].uppercase()
@@ -123,7 +134,11 @@ class DeviceShellServer(
             val headers = LinkedHashMap<String, String>()
             var headerBytes = 0
             while (true) {
-                val line = readLine(input) ?: break
+                val line = try {
+                    readLine(input) ?: break
+                } catch (_: HeaderTooLongException) {
+                    return respond(client, 431, "text/plain", "header line too long")
+                }
                 if (line.isEmpty()) break
                 headerBytes += line.length + 2
                 if (headers.size > MAX_HEADER_COUNT || headerBytes > MAX_HEADER_TOTAL) {
@@ -141,6 +156,8 @@ class DeviceShellServer(
             } else {
                 ""
             }
+            // 令牌每请求实时读取：用户「重新生成令牌」后立即生效，不需要重建监听
+            val token = runCatching { tokenProvider() }.getOrDefault("")
             if (!tokenEquals(provided, token)) {
                 return respond(client, 401, "application/json", """{"error":"unauthorized"}""")
             }
@@ -171,6 +188,8 @@ class DeviceShellServer(
                     if (length > MAX_BODY) {
                         return respond(client, 413, "application/json", """{"error":"body too large"}""")
                     }
+                    // 读 body 放宽超时：大 body / 网络抖动会分多次到达
+                    client.soTimeout = BODY_TIMEOUT_MS
                     val bytes = readExactly(input, length)
                     val payload = String(bytes, Charsets.UTF_8)
                     val json = runCatching { JSONObject(payload) }.getOrNull()
@@ -186,9 +205,14 @@ class DeviceShellServer(
                     }
 
                     // 4) 危险命令防护：先拦再执行（原因给 agent，也写审计）
-                    val blocked = runCatching { guard(command) }.getOrNull()
+                    // 防护本身抛异常时按「拦住」处理（fail-closed）：宁可拒绝执行，也不能放行没检查过的命令
+                    val blocked = try {
+                        guard(command)
+                    } catch (error: Exception) {
+                        "危险命令防护内部错误（已拦截）：${error.message ?: error::class.java.simpleName}"
+                    }
                     if (blocked != null) {
-                        onAudit("BLOCKED  $command   （$blocked）")
+                        onAudit("BLOCKED  ${sanitize(command)}   （${sanitize(blocked)}）")
                         return respond(
                             client,
                             403,
@@ -201,12 +225,25 @@ class DeviceShellServer(
                         )
                     }
 
-                    val result = runBlocking { execute(command, timeout) }
+                    val result = try {
+                        runBlocking { execute(command, timeout) }
+                    } catch (error: Exception) {
+                        onAudit("ERROR  ${sanitize(command)}   （${error.message ?: error::class.java.simpleName}）")
+                        return respond(
+                            client,
+                            500,
+                            "application/json",
+                            JSONObject()
+                                .put("error", "execute-failed")
+                                .put("detail", error.message ?: "unknown")
+                                .toString(),
+                        )
+                    }
                     onAudit(
                         buildString {
                             append(if (result.timedOut) "TIMEOUT" else "exit=${result.exitCode}")
                             append("  ")
-                            append(command.take(200))
+                            append(sanitize(command))
                         },
                     )
                     val asJson = query.split('&').any { it.equals("format=json", true) } ||
@@ -256,7 +293,7 @@ class DeviceShellServer(
             }
             buffer.write(current)
             previous = current
-            if (buffer.size() > MAX_HEADER_LINE) return null
+            if (buffer.size() > MAX_HEADER_LINE) throw HeaderTooLongException()
         }
     }
 
@@ -308,7 +345,18 @@ class DeviceShellServer(
         return java.security.MessageDigest.isEqual(a.toByteArray(), b.toByteArray())
     }
 
+    /** 审计日志里不能出现 CR/LF/Tab，否则可以伪造出一行假的审计记录；长度统一截到 200。 */
+    private fun sanitize(text: String): String =
+        text.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ').take(200)
+
+    /** 请求行/头行超过上限：不再当作「头结束」返回 null，而是明确回 431。 */
+    private class HeaderTooLongException : Exception()
+
     private companion object {
+        /** 头部读取阶段：慢速连接不能长时间占着池线程。 */
+        const val HEADER_TIMEOUT_MS = 5_000
+        /** 读 body 时放宽（大 body 会分多次到达）。 */
+        const val BODY_TIMEOUT_MS = 20_000
         const val MAX_BODY = 1 shl 20          // 1 MiB
         const val MAX_HEADER_LINE = 8 shl 10   // 单行请求头最长 8 KiB
         const val MAX_HEADER_COUNT = 32        // 请求头最多 32 行

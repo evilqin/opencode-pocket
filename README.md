@@ -46,7 +46,7 @@
 2. 手机需要 **ARM64**，Android **11（API 30）及以上**。
 3. 安装后打开 → 「开始安装」→ 选镜像 → 等 5 分钟左右。
 
-> 三份构建产物都在 [Releases](../../releases) 里（当前 1.3.0）：
+> 三份构建产物都在 [Releases](../../releases) 里（当前 1.4.0）：
 > `*-arm64.apk`（标准包，未混淆，最稳）、
 > `*-arm64-slim.apk`（R8 精简包，约 4 MB，体积小但需要真机回归一遍）、
 > `*-debug.apk`（调试包，日志最全）。
@@ -60,7 +60,7 @@ git clone <this-repo> && cd opencode-pocket
 node tools/fetch-boot-runtime.mjs
 
 # 2) 单元测试 + 构建
-./gradlew :app:testDebugUnitTest    # 148 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / tar 安全 / 差分 / proot 参数）
+./gradlew :app:testDebugUnitTest    # 161 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / tar 安全 / 差分 / proot 参数 / 危险命令防护）
 ./gradlew :app:assembleDebug        # 产物：app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assembleRelease      # 默认用 debug 签名，可直接安装
 
@@ -74,7 +74,7 @@ bash tools/ci-runtime-smoke.sh
 **发布新版本**：改 `app/build.gradle.kts` 里的 `versionCode` / `versionName`，然后推一个同名标签即可自动构建并发布 Release（CI 会先校验 tag 与 versionName 一致，并且**必须先通过容器冒烟测试**）：
 
 ```bash
-git tag v1.3.1 && git push origin v1.3.1
+git tag v1.4.1 && git push origin v1.4.1
 ```
 
 环境要求：JDK 21+、Android SDK（platform 37 + build-tools 36.0.0）、Node 20+（只用来跑取件脚本）。
@@ -207,6 +207,20 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 - apt 在手机侧网络下装包、>60 分钟长跑与 SSE 泄漏、覆盖安装签名矩阵；
 - R8 精简包的功能回归（所以默认发布的还是未混淆版本）。
 
+## 1.4.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
+
+- **安全加固专项**（第四轮审查 13 条全部落地）：危险命令防护不可绕写（规范化 + 分段判定 +
+  结构性拦截 + fail-closed）；桥令牌与防护开关实时生效；WebView 只对目标服务端口回填口令；
+  工作区策略拒绝 `.`/`..` 与 `Android/data|obb` 并 canonicalize；审计日志防 CR/LF 伪造；
+  dexec 令牌不再经过命令行
+- **服务生命周期**：启动/停止互斥 + 世代号（快速连点不再状态错乱）；清理命令先核对 `/proc` cmdline
+  再杀（防 pid 复用误杀）；WakeLock 全路径释放（不再拖到 60 分钟超时）
+- **安装管线**：`.part` 按来源隔离（换镜像不再拼出坏文件）；无长度且无摘要时拒绝「成功」；
+  写容器文件前清软链；CA 半成品清理；空间预检统一 2 GiB；tar 硬链接防逃逸 / 截断报错 / 权限位保真
+- **UI/UX**：停止服务与重置口令二次确认；聊天页状态跨旋转保留 + 返回键回列表 + 长按复制 + 智能吸底；
+  差分计算移出主线程；终端状态保留
+- 单元测试 148 → 161
+
 ## 1.3.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
 
 - **CI 里真的把容器跑一遍**：Linux + proot 全流程（rootfs → 脚本 → apt/dpkg → Node/opencode → 服务与 API → web UI），
@@ -222,7 +236,7 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 ### 手机端验收清单（下一步要做的）
 
-装了 1.3.0 之后，按这个顺序过一遍最省事（有问题就把「设置 → 导出日志」发我）：
+装了 1.4.0 之后，按这个顺序过一遍最省事（有问题就把「设置 → 导出日志」发我）：
 
 1. **安装环境**：安装页 →「全线测速」→「一键安装」→ 4 步都过（重点看第 3 步 `apt` 与第 4 步 `opencode`）；
 2. **服务**：首页 →「启动服务」→ 状态变绿，通知栏出现「OpenCode 服务」；

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationManagerCompat
 import dev.pocket.opencode.PocketApp
 import dev.pocket.opencode.core.ServerPhase
@@ -39,16 +40,25 @@ class ServerService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_START
-        // 必须在 5 秒内进前台
-        startForeground(
-            Notifications.ID_SERVER,
-            Notifications.serverNotification(
-                this,
-                title = "OpenCode 口袋",
-                text = "准备中…",
-                running = true,
-            ),
-        )
+        // 必须在 5 秒内进前台。系统可能拒绝（后台启动限制、通知被关等），
+        // 失败时不要崩溃，也不要把服务硬撑在没前台的半吊子状态。
+        val foregroundOk = runCatching {
+            startForeground(
+                Notifications.ID_SERVER,
+                Notifications.serverNotification(
+                    this,
+                    title = "OpenCode 口袋",
+                    text = "准备中…",
+                    running = true,
+                ),
+            )
+        }.isSuccess
+        if (!foregroundOk) {
+            Log.w(TAG, "startForeground 失败，停止服务")
+            releaseWakeLock()
+            runCatching { stopSelf() }
+            return START_NOT_STICKY
+        }
         startObserving()
 
         when (action) {
@@ -67,12 +77,14 @@ class ServerService : Service() {
                 acquireWakeLock()
                 val settings = engine.settings.snapshot()
                 engine.server.restart(settings)
+                releaseWakeLockOnImmediateFailure()
             }
 
             else -> scope.launch {
                 if (engine.server.isAlive()) return@launch
                 acquireWakeLock()
                 engine.server.start(engine.settings.snapshot())
+                releaseWakeLockOnImmediateFailure()
             }
         }
         return START_STICKY
@@ -81,6 +93,8 @@ class ServerService : Service() {
     private fun startObserving() {
         if (observeJob?.isActive == true) return
         observeJob = scope.launch {
+            // 本次前台服务是否真的进入过活动状态（RUNNING/STARTING）。
+            var sawActive = false
             // WakeLock 续期：状态流在值不变时不会重新发射，所以不能只在状态跳变时续期，
             // 否则连续运行超过 60 分钟后锁会静默过期（长任务是这个应用的核心场景）。
             launch {
@@ -90,6 +104,26 @@ class ServerService : Service() {
                 }
             }
             engine.server.status.collect { status ->
+                // 见过 RUNNING/STARTING 才说明「确实起来过」，之后失败/停止才有必要收尾，
+                // 否则会误伤启动瞬间状态流里那个初始的 STOPPED。
+                when (status.phase) {
+                    ServerPhase.RUNNING, ServerPhase.STARTING -> sawActive = true
+                    ServerPhase.ERROR -> if (sawActive) {
+                        // 启动失败：释放 WakeLock，并让前台服务退场，
+                        // 否则锁会一直拖到 60 分钟超时、ERROR 通知也一直挂着。
+                        releaseWakeLock()
+                        launch {
+                            delay(ERROR_STOP_DELAY_MS)
+                            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+                            runCatching { stopSelf() }
+                        }
+                    }
+                    ServerPhase.STOPPED -> if (sawActive) {
+                        // 服务已停：不再需要 WakeLock（保留 STOPPED 不自杀的既有行为）。
+                        releaseWakeLock()
+                    }
+                    else -> Unit
+                }
                 val text = when (status.phase) {
                     ServerPhase.RUNNING -> "127.0.0.1:${status.port}  ·  v${status.version.ifBlank { "?" }}"
                     ServerPhase.STARTING -> status.hint.ifBlank { "启动中…" }
@@ -138,6 +172,18 @@ class ServerService : Service() {
         wakeLock = null
     }
 
+    /**
+     * 补一次「启动立刻失败」的收尾。
+     *
+     * start()/restart() 会在口令没生成、容器没装好这类情况下**同步**置 ERROR 并返回，
+     * 状态从没到过 STARTING/RUNNING —— 状态收集协程里的 sawActive 永远是 false，
+     * 于是刚 acquireWakeLock() 拿到的锁没人释放，会一直拖到 60 分钟超时。
+     * 这里按「启动流程走完仍是 ERROR」兜底释放；锁已经释放过时是空操作。
+     */
+    private fun releaseWakeLockOnImmediateFailure() {
+        if (engine.server.status.value.phase == ServerPhase.ERROR) releaseWakeLock()
+    }
+
     override fun onDestroy() {
         releaseWakeLock()
         scope.cancel()
@@ -154,5 +200,10 @@ class ServerService : Service() {
 
         /** 续期间隔：比超时短一半，保证锁不会过期。 */
         private const val WAKELOCK_RENEW_INTERVAL_MS = 30 * 60 * 1000L
+
+        /** 启动失败后延迟几秒再退场：给用户留一点看到错误通知的时间。 */
+        private const val ERROR_STOP_DELAY_MS = 5_000L
+
+        private const val TAG = "ServerService"
     }
 }
