@@ -34,6 +34,7 @@ DPKG_OPTS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
 
 apt-get -y --no-install-recommends "${DPKG_OPTS[@]}" install \
     ca-certificates \
+    libatomic1 \
     curl \
     git \
     xz-utils \
