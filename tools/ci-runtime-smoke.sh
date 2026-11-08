@@ -198,13 +198,35 @@ if [ ! -x "$ROOTFS/usr/local/bin/node" ]; then
   NODE_VERSION=$(curl -fsSL "$MIRROR_NODE/index.json" \
     | jq -r '[.[] | select(.lts != false) | select(.files | index("linux-x64"))]
              | sort_by(.version | ltrimstr("v") | split(".") | map(tonumber))
-             | last | .version')
+             | last | .version') \
+    || NODE_VERSION=$(curl -fsSL "https://nodejs.org/dist/index.json" \
+      | jq -r '[.[] | select(.lts != false) | select(.files | index("linux-x64"))]
+               | sort_by(.version | ltrimstr("v") | split(".") | map(tonumber))
+               | last | .version')
+  if [ -z "$NODE_VERSION" ] || [ "$NODE_VERSION" = "null" ]; then
+    NODE_VERSION=$(curl -fsSL "https://nodejs.org/dist/index.json" \
+      | jq -r '[.[] | select(.lts != false) | select(.files | index("linux-x64"))]
+               | sort_by(.version | ltrimstr("v") | split(".") | map(tonumber))
+               | last | .version')
+  fi
   [ -n "$NODE_VERSION" ] && [ "$NODE_VERSION" != "null" ] || fail "没能在 index.json 里找到 x64 LTS"
   FILE="node-$NODE_VERSION-linux-x64.tar.xz"
-  curl -fsSL "$MIRROR_NODE/$NODE_VERSION/$FILE" -o "$WORK/$FILE"
-  EXPECTED=$(curl -fsSL "$MIRROR_NODE/$NODE_VERSION/SHASUMS256.txt" | grep -F "$FILE" | awk '{print $1}')
-  ACTUAL=$(sha256sum "$WORK/$FILE" | awk '{print $1}')
-  [ "$EXPECTED" = "$ACTUAL" ] || fail "Node 摘要不匹配"
+  # 镜像可能还没同步刚发布的 LTS（npmmirror 出现过 index 有、文件 404）：官方源兜底
+  NODE_OK=0
+  for base in "$MIRROR_NODE" "https://nodejs.org/dist"; do
+    if curl -fsSL "$base/$NODE_VERSION/$FILE" -o "$WORK/$FILE"; then
+      EXPECTED=$(curl -fsSL "$base/$NODE_VERSION/SHASUMS256.txt" | grep -F "$FILE" | awk '{print $1}') || EXPECTED=""
+      ACTUAL=$(sha256sum "$WORK/$FILE" | awk '{print $1}')
+      if [ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ]; then
+        NODE_OK=1
+        break
+      fi
+      printf '[smoke] 注意：%s 的 Node 摘要不匹配，换下一个源\n' "$base"
+    else
+      printf '[smoke] 注意：%s 没有 Node %s，换下一个源\n' "$base" "$NODE_VERSION"
+    fi
+  done
+  [ "$NODE_OK" = 1 ] || fail "Node 下载失败（镜像与官方源都不可用，或摘要不匹配）"
   log "Node $NODE_VERSION 摘要校验通过"
   rm -rf "$WORK/node-extract"
   mkdir -p "$WORK/node-extract"
