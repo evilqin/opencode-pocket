@@ -260,6 +260,8 @@ After installing 1.5.0, this order is the fastest way through it (if something f
   duplicate LazyColumn keys in the diff list; invalid port input was silently discarded.
 - **Polish**: initialization always finishes even if a step throws; OkHttp 5 nullability cleanup; unused
   imports removed; tests 161 → 166.
+- **Device-level**: base tools now install `libatomic1` (Node 26 LTS needs it; caught by CI); the smoke test
+  falls back to the official Node source when a mirror lags behind a new LTS.
 
 ### 1.4.0 (full list in [CHANGELOG](CHANGELOG.md))
 

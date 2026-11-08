@@ -220,6 +220,7 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
   测速异常后按钮永远卡在「测速中」；安装页/终端在组合期做磁盘 IO；对话历史加载与实时事件竞态；
   `session.error` 后输入框卡在「停止」；差分列表重复 key 崩溃；端口对话框静默丢弃非法输入
 - **优化**：初始化异常也能结束（不再卡启动）；OkHttp 5 可空性清理；未使用导入清理；测试 161 → 166
+- **真机级**：基础工具补装 `libatomic1`（Node 26 LTS 启动依赖，CI 冒烟抓到）；Node 镜像滞后时回退官方源
 
 ## 1.4.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
 
