@@ -1,7 +1,8 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import android.system.Os
-import android.system.OsConstants
 import java.io.File
 import java.io.IOException
 
@@ -69,7 +70,7 @@ object FileOps {
         if (!newDir.renameTo(target)) {
             // 换过去失败：尽量把旧环境换回来再报错
             if (backup.exists()) backup.renameTo(target)
-            throw IOException("无法把 ${newDir.name} 换成 ${target.name}")
+            throw IOException(t("无法把 ${newDir.name} 换成 ${target.name}", "Could not replace ${target.name} with ${newDir.name}"))
         }
         return backup
     }
@@ -87,7 +88,7 @@ object FileOps {
         }
         deleteTree(target)
         if (!backup.renameTo(target)) {
-            throw IOException("回滚失败：无法把 ${backup.name} 换回 ${target.name}")
+            throw IOException(t("回滚失败：无法把 ${backup.name} 换回 ${target.name}", "Rollback failed: could not restore ${backup.name} to ${target.name}"))
         }
     }
 
@@ -144,7 +145,7 @@ object FileOps {
 
     /** 只有当内容不同（大小或首块不同）才复制，避免升级后残留旧文件。 */
     fun copyIfChanged(source: File, target: File, mode: Int? = null): Boolean {
-        if (!source.isFile) throw IOException("缺少源文件：${source.name}")
+        if (!source.isFile) throw IOException(t("缺少源文件：${source.name}", "Source file is missing: ${source.name}"))
         if (target.isFile && target.length() == source.length() && sameHead(source, target)) return false
         target.parentFile?.mkdirs()
         source.inputStream().use { input -> target.outputStream().use { input.copyTo(it) } }

@@ -1,5 +1,6 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.I18n
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,7 +17,35 @@ object OpencodeConfig {
         val label: String,
         val env: String?,
         val hint: String = "",
-    )
+    ) {
+        /** 当前语言下的展示文案（providers 是单例列表，不能在构造时调用 t()）。 */
+        val labelText: String
+            get() = I18n.t(
+                label,
+                when (id) {
+                    "moonshotai" -> "Moonshot"
+                    "zhipuai" -> "Zhipu GLM"
+                    "alibaba" -> "Alibaba Qwen"
+                    "siliconflow" -> "SiliconFlow"
+                    "openai-compatible" -> "Custom OpenAI-compatible"
+                    else -> label
+                },
+            )
+
+        val hintText: String
+            get() = I18n.t(
+                hint,
+                when (hint) {
+                    "claude 系列" -> "Claude models"
+                    "聚合多家模型" -> "Aggregates many models"
+                    "推理速度快" -> "Fast inference"
+                    "OpenAI 兼容模式" -> "OpenAI-compatible"
+                    "国内聚合" -> "China aggregator"
+                    "需要填 baseURL" -> "baseURL required"
+                    else -> hint
+                },
+            )
+    }
 
     val providers = listOf(
         Provider("deepseek", "DeepSeek", "DEEPSEEK_API_KEY", "platform.deepseek.com"),
@@ -92,7 +121,7 @@ object OpencodeConfig {
                 if (id == CUSTOM_PROVIDER_ID) {
                     // 自定义 OpenAI 兼容端点：opencode 需要 npm/name/models 才知道怎么调它
                     entry.put("npm", "@ai-sdk/openai-compatible")
-                    entry.put("name", "自定义 OpenAI 兼容")
+                    entry.put("name", findProvider(CUSTOM_PROVIDER_ID)?.labelText ?: "Custom OpenAI-compatible")
                     val modelId = settings.defaultModel
                         .takeIf { it.startsWith("$CUSTOM_PROVIDER_ID/") }
                         ?.substringAfter('/')

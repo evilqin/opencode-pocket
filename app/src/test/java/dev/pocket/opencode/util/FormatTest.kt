@@ -40,6 +40,17 @@ class FormatTest {
     }
 
     @Test
+    fun `英文时长与相对时间`() {
+        assertEquals("5s", Format.duration(5_000, english = true))
+        assertEquals("2m 3s", Format.duration(123_000, english = true))
+        assertEquals("1h 2m", Format.duration(3_720_000, english = true))
+        assertEquals("1d 1h", Format.duration(25 * 3_600_000L, english = true))
+        val now = System.currentTimeMillis()
+        assertEquals("just now", Format.relativeTime(now - 10_000, english = true))
+        assertEquals("5 min ago", Format.relativeTime(now - 5 * 60_000, english = true))
+    }
+
+    @Test
     fun `token 数量缩写`() {
         assertEquals("999", Format.tokens(999))
         assertEquals("1.5k", Format.tokens(1500))

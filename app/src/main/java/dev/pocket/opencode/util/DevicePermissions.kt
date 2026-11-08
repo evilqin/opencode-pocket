@@ -20,8 +20,7 @@ object DevicePermissions {
             PackageManager.PERMISSION_GRANTED
     }
 
-    fun hasAllFilesAccess(): Boolean =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Environment.isExternalStorageManager() else true
+    fun hasAllFilesAccess(): Boolean = Environment.isExternalStorageManager()
 
     fun isIgnoringBatteryOptimizations(context: Context): Boolean {
         val power = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -29,7 +28,6 @@ object DevicePermissions {
     }
 
     fun requestAllFilesAccess(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         runCatching {
             context.startActivity(
                 Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)

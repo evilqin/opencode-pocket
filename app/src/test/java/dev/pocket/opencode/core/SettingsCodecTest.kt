@@ -36,6 +36,7 @@ class SettingsCodecTest {
             smallModel = "deepseek/deepseek-chat",
             themeMode = "light",
             dynamicColor = true,
+            language = "en",
             notificationAsked = true,
             autoStartOnBoot = true,
         )
@@ -57,6 +58,7 @@ class SettingsCodecTest {
         val decoded = SettingsCodec.decode(partial)
         assertEquals(5000, decoded.port)
         assertEquals("light", decoded.themeMode)
+        assertEquals(AppSettings().language, decoded.language)
         assertEquals(AppSettings().workspace, decoded.workspace)
         assertEquals(AppSettings().snapshot, decoded.snapshot)
         assertTrue(decoded.providerKeys.isEmpty())

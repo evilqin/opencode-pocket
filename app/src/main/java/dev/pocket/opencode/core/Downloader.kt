@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import android.content.Context
 import java.io.File
 import java.io.IOException
@@ -76,7 +78,7 @@ class Downloader(context: Context) {
         var lastError: Exception? = null
         while (attempt < 3) {
             currentCoroutineContext().ensureActive()
-            if (isCanceled()) throw CancellationException("下载已取消")
+            if (isCanceled()) throw CancellationException(t("下载已取消", "Download cancelled"))
             attempt++
             try {
                 downloadOnce(url, part, target, expected, onProgress, isCanceled)
@@ -92,7 +94,7 @@ class Downloader(context: Context) {
                 if (attempt < 3) delay(1200L * attempt)
             }
         }
-        throw IOException("下载失败：$url（${lastError?.message}）", lastError)
+        throw IOException(t("下载失败：$url（${lastError?.message}）", "Download failed: $url (${lastError?.message})"), lastError)
     }
 
     /** 依次尝试多个镜像，任一成功即返回。 */
@@ -116,7 +118,7 @@ class Downloader(context: Context) {
                 lastError = error
             }
         }
-        throw IOException("所有镜像都失败了：${lastError?.message}", lastError)
+        throw IOException(t("所有镜像都失败了：${lastError?.message}", "All mirrors failed: ${lastError?.message}"), lastError)
     }
 
     private fun downloadOnce(
@@ -141,18 +143,18 @@ class Downloader(context: Context) {
                 // 请求的偏移超过服务端文件大小：多半是 .part 已经完整（或文件变小了），
                 // 删掉半成品从零重来，而不是让三次重试全撞 416
                 part.delete()
-                throw IOException("续传起点超出文件大小（已重置下载）")
+                throw IOException(t("续传起点超出文件大小（已重置下载）", "Resume offset exceeds the file size (download reset)"))
             }
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-            val body = response.body ?: throw IOException("空响应")
+            val body = response.body
             val appending = response.code == 206
             if (appending) {
                 // 服务端必须明确给出续传区间，否则宁可从零重来（拼错的文件比慢更糟）
                 val start = response.header("Content-Range")
                     ?.substringAfter("bytes ")?.substringBefore('-')?.toLongOrNull()
-                    ?: throw IOException("206 响应缺少 Content-Range，无法安全续传")
+                    ?: throw IOException(t("206 响应缺少 Content-Range，无法安全续传", "206 response has no Content-Range; cannot resume safely"))
                 if (start != existing) {
-                    throw IOException("服务端返回的续传区间不对：$start != $existing")
+                    throw IOException(t("服务端返回的续传区间不对：$start != $existing", "Server returned a wrong resume range: $start != $existing"))
                 }
             }
             val bodyLength = body.contentLength()
@@ -172,7 +174,7 @@ class Downloader(context: Context) {
                 var speed = 0L
                 body.byteStream().use { input ->
                     while (true) {
-                        if (isCanceled()) throw CancellationException("下载已取消")
+                        if (isCanceled()) throw CancellationException(t("下载已取消", "Download cancelled"))
                         val read = input.read(buffer)
                         if (read < 0) break
                         output.write(buffer, 0, read)
@@ -191,12 +193,12 @@ class Downloader(context: Context) {
                 onProgress(Progress(written, total, speed, url))
             }
             if (total > 0 && part.length() < total) {
-                throw IOException("连接提前中断（${part.length()}/$total）")
+                throw IOException(t("连接提前中断（${part.length()}/$total）", "Connection ended early (${part.length()}/$total)"))
             }
             if (total < 0 && expected == null) {
                 // 既没有长度也没有摘要：无法证明文件完整，宁可不收尾。
                 // .part 保留着，重试时带 Range 通常能拿到 206 + Content-Length，从而走上面的长度校验。
-                throw IOException("服务器未提供内容长度且没有可用的校验和，无法确认下载完整")
+                throw IOException(t("服务器未提供内容长度且没有可用的校验和，无法确认下载完整", "Server sent no content length and no checksum is available; cannot verify the download"))
             }
             if (expected != null) {
                 // 校验失败时删掉半成品，避免下次误用
@@ -204,7 +206,7 @@ class Downloader(context: Context) {
                 if (!actual.equals(expected.hex, ignoreCase = true)) {
                     part.delete()
                     throw IllegalStateException(
-                        "校验和不匹配：期望 ${expected.hex.take(16)}…，实际 ${actual.take(16)}…",
+                        t("校验和不匹配：期望 ${expected.hex.take(16)}…，实际 ${actual.take(16)}…", "Checksum mismatch: expected ${expected.hex.take(16)}…, got ${actual.take(16)}…"),
                     )
                 }
             }
@@ -229,7 +231,7 @@ class Downloader(context: Context) {
             .build()
             .newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IOException("HTTP ${response.code} @ $url")
-                response.body?.string() ?: throw IOException("空响应 @ $url")
+                response.body.string()
             }
     }
 

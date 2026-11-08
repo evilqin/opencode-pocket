@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import android.content.ComponentName
 import android.content.Context
 import android.content.ServiceConnection
@@ -162,10 +164,10 @@ class ShizukuBridge(private val context: Context) {
     /** 在手机本体上执行一条命令。 */
     suspend fun exec(command: String, timeoutMs: Long = 30_000): Result = withContext(Dispatchers.IO) {
         if (!connect()) {
-            return@withContext Result(-1, "", "Shizuku 未授权或未运行（App → 设置 → 设备 Shell）")
+            return@withContext Result(-1, "", t("Shizuku 未授权或未运行（App → 设置 → 设备 Shell）", "Shizuku is not authorized or not running (App → Settings → Device shell)"))
         }
         val target = service
-            ?: return@withContext Result(-1, "", "Shizuku 用户服务未连接")
+            ?: return@withContext Result(-1, "", t("Shizuku 用户服务未连接", "Shizuku user service is not connected"))
         val raw = try {
             target.exec(command, timeoutMs.toInt())
         } catch (cancel: kotlinx.coroutines.CancellationException) {
@@ -175,7 +177,7 @@ class ShizukuBridge(private val context: Context) {
             // binder 可能掉了：清掉引用，下一次调用重新绑定
             service = null
             uid = null
-            return@withContext Result(-1, "", "Shizuku 调用失败：${error.message}")
+            return@withContext Result(-1, "", t("Shizuku 调用失败：${error.message}", "Shizuku call failed: ${error.message}"))
         }
         val json = runCatching { JSONObject(raw) }.getOrNull()
             ?: return@withContext Result(-1, raw, "")

@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import android.content.Context
 import android.os.Build
 import dev.pocket.opencode.util.DevicePermissions
@@ -39,7 +41,7 @@ class Doctor(
             val result = try {
                 probe()
             } catch (error: Exception) {
-                Check("检查出错", Status.FAIL, error.message ?: error.toString())
+                Check(t("检查出错", "Check failed"), Status.FAIL, error.message ?: error.toString())
             }
             onUpdate(result)
         }
@@ -49,9 +51,9 @@ class Doctor(
         {
             val abis = Build.SUPPORTED_ABIS.toList()
             if (abis.any { it == "arm64-v8a" }) {
-                Check("设备架构", Status.OK, "arm64-v8a · ${Build.MODEL}")
+                Check(t("设备架构", "Device architecture"), Status.OK, "arm64-v8a · ${Build.MODEL}")
             } else {
-                Check("设备架构", Status.FAIL, "这台设备不是 arm64：${abis.joinToString()}")
+                Check(t("设备架构", "Device architecture"), Status.FAIL, t("这台设备不是 arm64：${abis.joinToString()}", "This device is not arm64: ${abis.joinToString()}"))
             }
         },
 
@@ -60,26 +62,26 @@ class Doctor(
                 .filter { !it.isFile || it.length() == 0L }
             if (missing.isEmpty()) {
                 Check(
-                    "内置 proot 运行时", Status.OK,
+                    t("内置 proot 运行时", "Bundled proot runtime"), Status.OK,
                     "proot ${paths.prootBin.length() / 1024} KB · loader ${paths.prootLoader.length() / 1024} KB",
                 )
             } else {
-                Check("内置 proot 运行时", Status.FAIL, "缺少 ${missing.joinToString { it.name }}，请重新安装 APK")
+                Check(t("内置 proot 运行时", "Bundled proot runtime"), Status.FAIL, t("缺少 ${missing.joinToString { it.name }}，请重新安装 APK", "Missing ${missing.joinToString { it.name }}; reinstall the APK"))
             }
         },
 
         {
             runCatching { proot.stageBootRuntime() }
             if (paths.bootRuntimeStaged()) {
-                Check("运行时依赖落地", Status.OK, "libtalloc.so.2 / libandroid-shmem.so 已就绪")
+                Check(t("运行时依赖落地", "Runtime libraries staged"), Status.OK, t("libtalloc.so.2 / libandroid-shmem.so 已就绪", "libtalloc.so.2 / libandroid-shmem.so are ready"))
             } else {
-                Check("运行时依赖落地", Status.FAIL, "依赖没能复制到 ${paths.libDir.absolutePath}")
+                Check(t("运行时依赖落地", "Runtime libraries staged"), Status.FAIL, t("依赖没能复制到 ${paths.libDir.absolutePath}", "Libraries could not be copied to ${paths.libDir.absolutePath}"))
             }
         },
 
         {
             if (!File(paths.rootfs, "bin/bash").isFile) {
-                Check("容器 rootfs", Status.FAIL, "还没解压（缺 /bin/bash），到安装页跑一次")
+                Check(t("容器 rootfs", "Container rootfs"), Status.FAIL, t("还没解压（缺 /bin/bash），到安装页跑一次", "Not extracted yet (no /bin/bash); run Setup"))
             } else {
                 val config = settings.snapshot()
                 val output = shell.run(
@@ -89,11 +91,14 @@ class Doctor(
                 )
                 if (output.success && output.text.contains("aarch64")) {
                     val pretty = output.lines.lastOrNull { it.isNotBlank() && !it.contains("aarch64") }?.trim()
-                    Check("容器 rootfs", Status.OK, "${pretty ?: "Ubuntu"} · aarch64")
+                    Check(t("容器 rootfs", "Container rootfs"), Status.OK, "${pretty ?: "Ubuntu"} · aarch64")
                 } else {
                     Check(
-                        "容器 rootfs", Status.FAIL,
-                        "容器起不来：${output.text.takeLast(200).ifBlank { "无输出（exit=${output.exitCode}）" }}",
+                        t("容器 rootfs", "Container rootfs"), Status.FAIL,
+                        t(
+                            "容器起不来：${output.text.takeLast(200).ifBlank { "无输出（exit=${output.exitCode}）" }}",
+                            "Container failed to start: ${output.text.takeLast(200).ifBlank { "no output (exit=${output.exitCode})" }}",
+                        ),
                     )
                 }
             }
@@ -101,18 +106,21 @@ class Doctor(
 
         {
             if (!File(paths.rootfs, "usr/bin/git").isFile) {
-                Check("基础工具", Status.WARN, "没有 git，重跑安装页的「基础工具」这一步")
+                Check(t("基础工具", "Base tools"), Status.WARN, t("没有 git，重跑安装页的「基础工具」这一步", "git is missing; rerun the Base tools step in Setup"))
             } else {
                 val config = settings.snapshot()
                 val output = shell.run(
-                    "git --version; command -v rg >/dev/null && rg --version | head -n1 || echo 'rg 缺失'",
+                    t(
+                        "git --version; command -v rg >/dev/null && rg --version | head -n1 || echo 'rg 缺失'",
+                        "git --version; command -v rg >/dev/null && rg --version | head -n1 || echo 'rg missing'",
+                    ),
                     config,
                     timeoutMs = 120_000,
                 )
                 Check(
-                    "基础工具",
+                    t("基础工具", "Base tools"),
                     if (output.success) Status.OK else Status.WARN,
-                    output.lines.filter { it.isNotBlank() }.take(2).joinToString(" · ").ifBlank { "检查失败" },
+                    output.lines.filter { it.isNotBlank() }.take(2).joinToString(" · ").ifBlank { t("检查失败", "Check failed") },
                 )
             }
         },
@@ -120,16 +128,16 @@ class Doctor(
         {
             val binary = File(paths.rootfs, "usr/local/lib/opencode/bin/opencode")
             if (!binary.isFile) {
-                Check("opencode 可执行文件", Status.FAIL, "还没下载，重跑安装页的「OpenCode 本体」这一步")
+                Check(t("opencode 可执行文件", "opencode executable"), Status.FAIL, t("还没下载，重跑安装页的「OpenCode 本体」这一步", "Not downloaded yet; rerun the OpenCode step in Setup"))
             } else {
                 val config = settings.snapshot()
                 val output = shell.run("opencode --version", config, timeoutMs = 180_000)
                 if (output.success) {
-                    Check("opencode 可执行文件", Status.OK, "v${output.text.trim().take(40)}")
+                    Check(t("opencode 可执行文件", "opencode executable"), Status.OK, "v${output.text.trim().take(40)}")
                 } else {
                     Check(
-                        "opencode 可执行文件", Status.FAIL,
-                        "跑不起来：${output.text.takeLast(200).ifBlank { "exit=${output.exitCode}" }}",
+                        t("opencode 可执行文件", "opencode executable"), Status.FAIL,
+                        t("跑不起来：${output.text.takeLast(200).ifBlank { "exit=${output.exitCode}" }}", "Cannot run: ${output.text.takeLast(200).ifBlank { "exit=${output.exitCode}" }}"),
                     )
                 }
             }
@@ -137,16 +145,16 @@ class Doctor(
 
         {
             if (!File(paths.rootfs, "usr/bin/getent").isFile) {
-                Check("容器内域名解析", Status.SKIP, "容器里没有 getent，跳过")
+                Check(t("容器内域名解析", "DNS inside the container"), Status.SKIP, t("容器里没有 getent，跳过", "getent is missing in the container; skipped"))
             } else {
                 val config = settings.snapshot()
                 val host = Mirrors.find(Mirrors.apt, config.aptMirror).base
                     .removePrefix("https://").removePrefix("http://").substringBefore('/')
                 val output = shell.run("getent hosts $host | head -n1", config, timeoutMs = 60_000)
                 if (output.success && output.text.isNotBlank()) {
-                    Check("容器内域名解析", Status.OK, "$host → ${output.text.trim().take(60)}")
+                    Check(t("容器内域名解析", "DNS inside the container"), Status.OK, "$host → ${output.text.trim().take(60)}")
                 } else {
-                    Check("容器内域名解析", Status.WARN, "解析 $host 失败：apt 可能装不了包（换网络或换镜像源）")
+                    Check(t("容器内域名解析", "DNS inside the container"), Status.WARN, t("解析 $host 失败：apt 可能装不了包（换网络或换镜像源）", "Failed to resolve $host: apt may not be able to install packages (change network or mirror)"))
                 }
             }
         },
@@ -154,12 +162,12 @@ class Doctor(
         {
             val free = installer.freeSpaceBytes()
             val used = withContext(Dispatchers.IO) { shell.hostSize(paths.home) }
-            val detail = "容器占用 ${Format.bytes(used)} · 可用 ${Format.bytes(free)}"
+            val detail = t("容器占用 ${Format.bytes(used)} · 可用 ${Format.bytes(free)}", "Used ${Format.bytes(used)} · free ${Format.bytes(free)}")
             when {
-                free < 0 -> Check("存储空间", Status.INFO, detail)
-                free < 300L * 1024 * 1024 -> Check("存储空间", Status.FAIL, "$detail（不足 300 MB）")
-                free < 1024L * 1024 * 1024 -> Check("存储空间", Status.WARN, detail)
-                else -> Check("存储空间", Status.OK, detail)
+                free < 0 -> Check(t("存储空间", "Storage"), Status.INFO, detail)
+                free < 300L * 1024 * 1024 -> Check(t("存储空间", "Storage"), Status.FAIL, t("$detail（不足 300 MB）", "$detail (less than 300 MB free)"))
+                free < 1024L * 1024 * 1024 -> Check(t("存储空间", "Storage"), Status.WARN, detail)
+                else -> Check(t("存储空间", "Storage"), Status.OK, detail)
             }
         },
 
@@ -167,14 +175,14 @@ class Doctor(
             val config = settings.snapshot()
             val occupied = withContext(Dispatchers.IO) { isPortOccupied(config.port) }
             if (!occupied) {
-                Check("服务端口", Status.OK, "127.0.0.1:${config.port} 空闲")
+                Check(t("服务端口", "Server port"), Status.OK, t("127.0.0.1:${config.port} 空闲", "127.0.0.1:${config.port} is free"))
             } else {
                 // 自己正在跑的时候端口当然是被占用的，先问一句健康检查
                 val healthy = withContext(Dispatchers.IO) { isOurServer(config.port) }
                 if (healthy) {
-                    Check("服务端口", Status.OK, "127.0.0.1:${config.port} 是本应用的服务（健康检查通过）")
+                    Check(t("服务端口", "Server port"), Status.OK, t("127.0.0.1:${config.port} 是本应用的服务（健康检查通过）", "127.0.0.1:${config.port} is this app's server (health check passed)"))
                 } else {
-                    Check("服务端口", Status.WARN, "127.0.0.1:${config.port} 被其它进程占用，换一个端口")
+                    Check(t("服务端口", "Server port"), Status.WARN, t("127.0.0.1:${config.port} 被其它进程占用，换一个端口", "127.0.0.1:${config.port} is used by another process; choose another port"))
                 }
             }
         },
@@ -182,32 +190,32 @@ class Doctor(
         {
             val configured = settings.snapshot().providerKeys.filterValues { it.isNotBlank() }
             if (configured.isEmpty()) {
-                Check("模型密钥", Status.WARN, "还没配置任何 API Key（设置 → 模型与密钥）")
+                Check(t("模型密钥", "Model keys"), Status.WARN, t("还没配置任何 API Key（设置 → 模型与密钥）", "No API key configured yet (Settings → Models & keys)"))
             } else {
-                Check("模型密钥", Status.OK, "已配置：${configured.keys.joinToString()}")
+                Check(t("模型密钥", "Model keys"), Status.OK, t("已配置：${configured.keys.joinToString()}", "Configured: ${configured.keys.joinToString()}"))
             }
         },
 
         {
             val missing = buildList {
-                if (!DevicePermissions.hasNotificationPermission(context)) add("通知")
-                if (!DevicePermissions.hasAllFilesAccess()) add("所有文件访问")
-                if (!DevicePermissions.isIgnoringBatteryOptimizations(context)) add("电池白名单")
+                if (!DevicePermissions.hasNotificationPermission(context)) add(t("通知", "Notifications"))
+                if (!DevicePermissions.hasAllFilesAccess()) add(t("所有文件访问", "All files access"))
+                if (!DevicePermissions.isIgnoringBatteryOptimizations(context)) add(t("电池白名单", "Battery allowlist"))
             }
             if (missing.isEmpty()) {
-                Check("系统权限", Status.OK, "通知 / 文件 / 电池白名单都已就绪")
+                Check(t("系统权限", "System permissions"), Status.OK, t("通知 / 文件 / 电池白名单都已就绪", "Notifications, files and the battery allowlist are ready"))
             } else {
-                Check("系统权限", Status.WARN, "待开启：${missing.joinToString()}（首页有对应的授权入口）")
+                Check(t("系统权限", "System permissions"), Status.WARN, t("待开启：${missing.joinToString()}（首页有对应的授权入口）", "To enable: ${missing.joinToString()} (shortcuts are on Home)"))
             }
         },
 
         {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-                Check("幻影进程限制", Status.SKIP, "Android 11 及以下没有这个限制")
+                Check(t("幻影进程限制", "Phantom process limit"), Status.SKIP, t("Android 11 及以下没有这个限制", "This limit does not exist on Android 11 and below"))
             } else {
                 Check(
-                    "幻影进程限制", Status.INFO,
-                    "长任务被杀时用 adb/Shizuku 执行：settings put global settings_enable_monitor_phantom_procs false",
+                    t("幻影进程限制", "Phantom process limit"), Status.INFO,
+                    t("长任务被杀时用 adb/Shizuku 执行：settings put global settings_enable_monitor_phantom_procs false", "If long tasks get killed, run via adb/Shizuku: settings put global settings_enable_monitor_phantom_procs false"),
                 )
             }
         },

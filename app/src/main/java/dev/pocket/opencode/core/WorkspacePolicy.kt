@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import java.io.File
 
 /**
@@ -26,20 +28,20 @@ object WorkspacePolicy {
      */
     fun validate(path: String): String? {
         val trimmed = path.trim().trimEnd('/')
-        if (trimmed.isEmpty()) return "路径不能为空"
-        if (trimmed.length > 200) return "路径太长了"
-        if (!trimmed.startsWith("/")) return "请填绝对路径（例如 /sdcard/OpenCode）"
+        if (trimmed.isEmpty()) return t("路径不能为空", "Path cannot be empty")
+        if (trimmed.length > 200) return t("路径太长了", "Path is too long")
+        if (!trimmed.startsWith("/")) return t("请填绝对路径（例如 /sdcard/OpenCode）", "Enter an absolute path (e.g. /sdcard/OpenCode)")
         // `.` / `..` 这样的段会被文件系统解析掉：`/sdcard/.` 就是 /sdcard 本体，
         // 放行等于把整个共享存储 bind 进容器，和 exposeSdcard=false 的承诺矛盾
-        if (trimmed.split('/').any { it == "." || it == ".." }) return "路径里不能有 . 或 .. 这样的段"
+        if (trimmed.split('/').any { it == "." || it == ".." }) return t("路径里不能有 . 或 .. 这样的段", "The path cannot contain . or .. segments")
         if (trimmed in listOf("/sdcard", "/storage", "/storage/emulated/0", "/", "/data", "/system")) {
-            return "不能把整个 $trimmed 当工作区，请选它下面的具体目录"
+            return t("不能把整个 $trimmed 当工作区，请选它下面的具体目录", "Cannot use all of $trimmed as the workspace; choose a folder inside it")
         }
         if (forbiddenSegments.any { trimmed.contains(it, ignoreCase = true) }) {
-            return "不能选 Android/data 或 Android/obb 里的目录（那是其他应用的私有数据）"
+            return t("不能选 Android/data 或 Android/obb 里的目录（那是其他应用的私有数据）", "Folders under Android/data or Android/obb are private to other apps")
         }
         if (allowedRoots.none { it.matches(trimmed) }) {
-            return "只支持共享存储里的目录（/sdcard/… 或 /storage/…）"
+            return t("只支持共享存储里的目录（/sdcard/… 或 /storage/…）", "Only folders in shared storage are supported (/sdcard/… or /storage/…)")
         }
         return null
     }

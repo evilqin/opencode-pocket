@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import android.system.Os
 import java.io.BufferedInputStream
 import java.io.File
@@ -77,7 +79,7 @@ object TarExtract {
             val decompressed = wrapDecompressor(buffered)
             TarArchiveInputStream(decompressed).use { tar ->
                 while (true) {
-                    if (!isActive()) throw CancellationException("解压已取消")
+                    if (!isActive()) throw CancellationException(t("解压已取消", "Extraction cancelled"))
                     val entry = tar.nextEntry ?: break
                     processEntry(tar, entry, dest, root, strip, include, stats, isActive)
                     val now = System.currentTimeMillis()
@@ -98,12 +100,12 @@ object TarExtract {
         val read = input.read(magic)
         input.reset()
         if (read >= 2 && magic[0] == 0x1F.toByte() && magic[1] == 0x8B.toByte()) {
-            return GzipCompressorInputStream(input, true)
+            return GzipCompressorInputStream.builder().setInputStream(input).setDecompressConcatenated(true).get()
         }
         if (read >= 6 && magic[0] == 0xFD.toByte() && magic[1] == 0x37.toByte() && magic[2] == 0x7A.toByte() &&
             magic[3] == 0x58.toByte() && magic[4] == 0x5A.toByte() && magic[5] == 0x00.toByte()
         ) {
-            return XZCompressorInputStream(input, true)
+            return XZCompressorInputStream.builder().setInputStream(input).setDecompressConcatenated(true).get()
         }
         return input
     }
@@ -229,13 +231,13 @@ object TarExtract {
                     val buffer = ByteArray(256 * 1024)
                     var written = 0L
                     while (written < entry.size) {
-                        if (!isActive()) throw CancellationException("解压已取消")
+                        if (!isActive()) throw CancellationException(t("解压已取消", "Extraction cancelled"))
                         val want = minOf(buffer.size.toLong(), entry.size - written).toInt()
                         val count = tar.read(buffer, 0, want)
                         if (count < 0) {
                             // tar 声称有 entry.size 字节却没读满：包被截断了。
                             // 静默产出截断文件会让「安装完成」变得不可信，直接失败让上层重下。
-                            throw java.io.IOException("tar 数据不完整：${entry.name}（${written}/${entry.size} 字节）")
+                            throw java.io.IOException(t("tar 数据不完整：${entry.name}（${written}/${entry.size} 字节）", "Incomplete tar data: ${entry.name} (${written}/${entry.size} bytes)"))
                         }
                         output.write(buffer, 0, count)
                         written += count

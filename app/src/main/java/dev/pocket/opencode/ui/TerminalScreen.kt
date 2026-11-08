@@ -1,6 +1,7 @@
 package dev.pocket.opencode.ui
 
-import android.content.Intent
+import dev.pocket.opencode.i18n.t
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -15,23 +16,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -44,6 +43,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -62,8 +62,10 @@ import dev.pocket.opencode.core.StepState
 import dev.pocket.opencode.ui.components.LogConsole
 import dev.pocket.opencode.ui.components.copyToClipboard
 import dev.pocket.opencode.ui.theme.CodeTextStyle
-import dev.pocket.opencode.ui.theme.PocketColors
+import dev.pocket.opencode.ui.theme.LocalPocketAccents
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 /**
@@ -75,8 +77,8 @@ fun TerminalScreen(engine: PocketEngine) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     val install by engine.installer.state.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxSize()) {
-        TabRow(selectedTabIndex = tab) {
-            listOf("命令", "安装日志", "运行日志").forEachIndexed { index, title ->
+        PrimaryTabRow(selectedTabIndex = tab) {
+            listOf(t("命令", "Command"), t("安装日志", "Install log"), t("运行日志", "Runtime log")).forEachIndexed { index, title ->
                 Tab(
                     selected = tab == index,
                     onClick = { tab = index },
@@ -90,12 +92,12 @@ fun TerminalScreen(engine: PocketEngine) {
                 engine = engine,
                 isInstallLog = true,
                 emptyText = if (install.steps.any { it.state != StepState.PENDING }) {
-                    "还没有安装日志"
+                    t("还没有安装日志", "No install log yet")
                 } else {
-                    "开始安装后，这里会实时显示每一步的输出"
+                    t("开始安装后，这里会实时显示每一步的输出", "Output appears here once installation starts")
                 },
             )
-            else -> LogPanel(engine = engine, isInstallLog = false, emptyText = "启动服务后，这里会显示 opencode 的输出")
+            else -> LogPanel(engine = engine, isInstallLog = false, emptyText = t("启动服务后，这里会显示 opencode 的输出", "opencode output appears here after the server starts"))
         }
     }
 }
@@ -154,12 +156,18 @@ private val TermLineListSaver = listSaver<SnapshotStateList<TermLine>, String>(
 @Composable
 private fun CommandRunner(engine: PocketEngine) {
     val scope = rememberCoroutineScope()
+    val accents = LocalPocketAccents.current
     val settings by engine.settings.settings.collectAsStateWithLifecycle()
     val lines = rememberSaveable(saver = TermLineListSaver) { mutableStateListOf<TermLine>() }
     var input by rememberSaveable { mutableStateOf("") }
     var cwd by rememberSaveable { mutableStateOf("/root/workspace") }
     var busy by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val installState by engine.installer.state.collectAsStateWithLifecycle()
+    // 根文件系统探测会访问磁盘：别在每次重组时都 stat 一遍
+    val installed by produceState<Boolean?>(null, installState.installed) {
+        value = withContext(Dispatchers.IO) { engine.paths.rootfsLooksInstalled() }
+    }
 
     LaunchedEffect(lines.size) {
         if (lines.isNotEmpty()) listState.scrollToItem(lines.size - 1)
@@ -192,7 +200,7 @@ private fun CommandRunner(engine: PocketEngine) {
                     }
                 }
             } catch (error: Exception) {
-                lines.add(TermLine.Note("执行失败：${error.message}", error = true))
+                lines.add(TermLine.Note(t("执行失败：${error.message}", "Failed: ${error.message}"), error = true))
             } finally {
                 busy = false
             }
@@ -209,10 +217,10 @@ private fun CommandRunner(engine: PocketEngine) {
                 .background(Color(0xFF060B14))
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp)),
         ) {
-            if (engine.paths.rootfsLooksInstalled().not()) {
+            if (installed == false) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        "容器还没安装，先到「安装」页一键安装",
+                        t("容器还没安装，先到「安装」页一键安装", "The container isn't installed yet. Run setup first."),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -228,13 +236,13 @@ private fun CommandRunner(engine: PocketEngine) {
                             is TermLine.Prompt -> Text(
                                 "root@android:${line.cwd}\$ ${line.command}",
                                 style = CodeTextStyle,
-                                color = PocketColors.Cyan,
+                                color = accents.cyan,
                             )
                             is TermLine.Output -> Text(line.text, style = CodeTextStyle, color = Color(0xFFD7E3F4))
                             is TermLine.Note -> Text(
                                 line.text,
                                 style = CodeTextStyle,
-                                color = if (line.error) PocketColors.Rose else PocketColors.Amber,
+                                color = if (line.error) accents.rose else accents.amber,
                             )
                         }
                     }
@@ -290,9 +298,9 @@ private fun CommandRunner(engine: PocketEngine) {
                 enabled = !busy && input.isNotBlank(),
             ) {
                 if (busy) {
-                    Icon(Icons.Filled.Add, "执行中", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(Icons.Filled.Add, t("执行中", "Running"), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
-                    Icon(Icons.Filled.Send, "执行")
+                    Icon(Icons.AutoMirrored.Filled.Send, t("执行", "Run"))
                 }
             }
         }
@@ -330,14 +338,14 @@ private fun LogPanel(engine: PocketEngine, isInstallLog: Boolean, emptyText: Str
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
             )
-            TextButton(onClick = { copyToClipboard(context, lines.joinToString("\n"), "日志已复制") }) {
-                Text("复制")
+            TextButton(onClick = { copyToClipboard(context, lines.joinToString("\n"), t("日志已复制", "Log copied")) }) {
+                Text(t("复制", "Copy"))
             }
             TextButton(onClick = {
                 lines.clear()
                 // 同时清掉源缓冲，否则切走再回来历史又回来了
                 if (isInstallLog) engine.installer.clearLogs() else engine.server.clearRecentLogs()
-            }) { Text("清屏") }
+            }) { Text(t("清屏", "Clear")) }
         }
         if (lines.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

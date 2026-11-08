@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import android.content.Context
 import java.io.BufferedReader
 import java.io.File
@@ -104,8 +106,8 @@ class ServerController(
         if (settings.serverPassword.isBlank()) {
             _status.value = _status.value.copy(
                 phase = ServerPhase.ERROR,
-                error = "服务口令还没生成",
-                hint = "重开一次 App（或点一次启动）会自动生成",
+                error = t("服务口令还没生成", "Server password has not been generated"),
+                hint = t("重开一次 App（或点一次启动）会自动生成", "Reopen the app (or tap Start) to generate it automatically"),
             )
             return false
         }
@@ -115,8 +117,8 @@ class ServerController(
         ) {
             _status.value = _status.value.copy(
                 phase = ServerPhase.ERROR,
-                error = "容器环境还没装好",
-                hint = "先到「安装」页完成一键安装",
+                error = t("容器环境还没装好", "The container environment is not ready"),
+                hint = t("先到「安装」页完成一键安装", "Finish setup on the Install tab first"),
             )
             return false
         }
@@ -140,8 +142,8 @@ class ServerController(
      */
     private suspend fun runStart(myGeneration: Long, settings: AppSettings) {
         try {
-            _status.value = ServerStatus(ServerPhase.STARTING, port = settings.port, hint = "准备容器…")
-            appendLog("▶ 启动 OpenCode 服务（端口 ${settings.port}）")
+            _status.value = ServerStatus(ServerPhase.STARTING, port = settings.port, hint = t("准备容器…", "Preparing container…"))
+            appendLog(t("▶ 启动 OpenCode 服务（端口 ${settings.port}）", "▶ Starting the OpenCode server (port ${settings.port})"))
 
             proot.stageBootRuntime()
             net.writeResolvConf()
@@ -155,7 +157,7 @@ class ServerController(
                 )
             }
 
-            _status.value = _status.value.copy(hint = "拉起源码运行时…")
+            _status.value = _status.value.copy(hint = t("拉起源码运行时…", "Starting the runtime…"))
             val env = OpencodeConfig.environment(settings)
             val command =
                 "cd ${PocketPaths.Guest.WORKSPACE} 2>/dev/null || cd /root; " +
@@ -175,7 +177,7 @@ class ServerController(
             }
             readerJob = scope.launch { pump(myGeneration, started) }
 
-            _status.value = _status.value.copy(hint = "等待服务就绪…")
+            _status.value = _status.value.copy(hint = t("等待服务就绪…", "Waiting for the server…"))
             val healthy = awaitHealthy(settings.port, settings.serverPassword, timeoutMs = 240_000)
 
             // 等待期间被 stop()/restart() 取代：什么都不做（进程与状态由那一侧负责）
@@ -197,8 +199,8 @@ class ServerController(
                 if (generation == myGeneration) {
                     _status.value = _status.value.copy(
                         phase = ServerPhase.ERROR,
-                        error = "服务启动超时（已清理进程）",
-                        hint = "看一下运行日志：常见原因是没配 API Key、内存不足，或者端口被占用",
+                        error = t("服务启动超时（已清理进程）", "Server start timed out (process cleaned up)"),
+                        hint = t("看一下运行日志：常见原因是没配 API Key、内存不足，或者端口被占用", "Check the runtime log: common causes are a missing API key, low memory, or a busy port"),
                     )
                 }
                 return
@@ -213,16 +215,16 @@ class ServerController(
                     startedAt = System.currentTimeMillis(),
                     hint = "",
                 )
-                appendLog("✔ 服务已就绪：${baseUrl(settings.port)}（v${_status.value.version}）")
+                appendLog(t("✔ 服务已就绪：${baseUrl(settings.port)}（v${_status.value.version}）", "✔ Server ready: ${baseUrl(settings.port)} (v${_status.value.version})"))
             }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {
             if (generation == myGeneration) {
-                appendLog("✘ 启动失败：${error.message}")
+                appendLog(t("✘ 启动失败：${error.message}", "✘ Failed to start: ${error.message}"))
                 _status.value = _status.value.copy(
                     phase = ServerPhase.ERROR,
-                    error = error.message ?: "启动失败",
+                    error = error.message ?: t("启动失败", "Failed to start"),
                 )
             }
         }
@@ -231,8 +233,8 @@ class ServerController(
     // ------------------------------------------------------------------ 停止
 
     suspend fun stop(settings: AppSettings) {
-        _status.value = _status.value.copy(phase = ServerPhase.STOPPING, hint = "正在停止…")
-        appendLog("■ 正在停止服务…")
+        _status.value = _status.value.copy(phase = ServerPhase.STOPPING, hint = t("正在停止…", "Stopping…"))
+        appendLog(t("■ 正在停止服务…", "■ Stopping the server…"))
 
         // 1) 让进行中的启动作废并退出：否则它会在健康检查失败分支里
         //    把状态从「已停止」改回 ERROR，还会去清理进程。
@@ -268,7 +270,7 @@ class ServerController(
             )
         }
         _status.value = ServerStatus(phase = ServerPhase.STOPPED, port = settings.port)
-        appendLog("■ 服务已停止")
+        appendLog(t("■ 服务已停止", "■ Server stopped"))
     }
 
     suspend fun restart(settings: AppSettings) {
@@ -284,7 +286,7 @@ class ServerController(
             if (!isAlive()) return false
             if (attempts % 8 == 0) {
                 val seconds = ((System.currentTimeMillis() - (deadline - timeoutMs)) / 1000)
-                appendLog("… 仍在等待服务就绪（${seconds}s）")
+                appendLog(t("… 仍在等待服务就绪（${seconds}s）", "… still waiting for the server (${seconds}s)"))
             }
             val body = health(port, password)
             if (body != null && body.optBoolean("healthy", false)) return true
@@ -305,7 +307,7 @@ class ServerController(
         }
         val request = builder.build()
         healthClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) null else response.body?.string()?.let { JSONObject(it) }
+            if (!response.isSuccessful) null else JSONObject(response.body.string())
         }
     } catch (_: Exception) {
         null
@@ -327,11 +329,11 @@ class ServerController(
             if (isCurrent &&
                 (_status.value.phase == ServerPhase.RUNNING || _status.value.phase == ServerPhase.STARTING)
             ) {
-                appendLog("⚠ 服务进程结束（exit=$exit）")
+                appendLog(t("⚠ 服务进程结束（exit=$exit）", "⚠ Server process exited (exit=$exit)"))
                 _status.value = _status.value.copy(
                     phase = ServerPhase.ERROR,
-                    error = "服务进程退出（exit=$exit）",
-                    hint = "看运行日志定位原因，然后点「启动」重试",
+                    error = t("服务进程退出（exit=$exit）", "Server process exited (exit=$exit)"),
+                    hint = t("看运行日志定位原因，然后点「启动」重试", "Check the runtime log, then tap Start to retry"),
                 )
             }
         }

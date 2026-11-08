@@ -1,5 +1,7 @@
 package dev.pocket.opencode.ui.components
 
+import dev.pocket.opencode.i18n.t
+
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -43,7 +45,7 @@ import dev.pocket.opencode.ui.PocketIcons
 import dev.pocket.opencode.ui.theme.CodeTextStyle
 import dev.pocket.opencode.ui.theme.PocketColors
 
-fun copyToClipboard(context: Context, text: String, label: String = "已复制") {
+fun copyToClipboard(context: Context, text: String, label: String = t("已复制", "Copied")) {
     val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     manager.setPrimaryClip(ClipData.newPlainText("opencode", text))
     Toast.makeText(context, label, Toast.LENGTH_SHORT).show()
@@ -131,14 +133,14 @@ fun CodeBlock(language: String, code: String, modifier: Modifier = Modifier) {
             )
             IconButton(
                 onClick = {
-                    copyToClipboard(context, code, "代码已复制")
+                    copyToClipboard(context, code, t("代码已复制", "Code copied"))
                     copied = true
                 },
                 modifier = Modifier.size(34.dp),
             ) {
                 Icon(
                     if (copied) Icons.Filled.Check else PocketIcons.Copy,
-                    contentDescription = "复制",
+                    contentDescription = t("复制", "Copy"),
                     modifier = Modifier.size(15.dp),
                     tint = if (copied) PocketColors.Emerald else Color(0xFF8FA0BC),
                 )

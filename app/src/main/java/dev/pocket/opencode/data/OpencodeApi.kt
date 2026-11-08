@@ -87,7 +87,7 @@ class OpencodeApi(
 
     private suspend fun getText(path: String): String = withContext(Dispatchers.IO) {
         client.newCall(authorized(Request.Builder().url(url(path))).build()).execute().use { response ->
-            val body = response.body?.string().orEmpty()
+            val body = response.body.string()
             if (!response.isSuccessful) throw ApiException(response.code, body.take(300))
             body
         }
@@ -97,7 +97,7 @@ class OpencodeApi(
         val payload = (body ?: JSONObject()).toString()
         val request = authorized(Request.Builder().url(url(path)).post(payload.toRequestBody(jsonType))).build()
         client.newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
+            val text = response.body.string()
             if (!response.isSuccessful) throw ApiException(response.code, text.take(300))
             if (text.isBlank()) null else JSONObject(text)
         }
@@ -112,7 +112,7 @@ class OpencodeApi(
     private suspend fun patch(path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) {
         val request = authorized(Request.Builder().url(url(path)).patch(body.toString().toRequestBody(jsonType))).build()
         client.newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
+            val text = response.body.string()
             if (!response.isSuccessful) throw ApiException(response.code, text.take(300))
             JSONObject(text.ifBlank { "{}" })
         }
@@ -236,7 +236,7 @@ class OpencodeApi(
                     activeCall.set(call)
                     call.execute().use { response ->
                         if (!response.isSuccessful) throw ApiException(response.code, "event stream")
-                        val source = response.body?.source() ?: return@use
+                        val source = response.body.source()
                         if (connectedBefore) {
                             trySend(JSONObject().put("type", "resync"))
                         }

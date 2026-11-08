@@ -1,5 +1,8 @@
 package dev.pocket.opencode.data
 
+import dev.pocket.opencode.i18n.I18n
+import dev.pocket.opencode.i18n.t
+
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -91,11 +94,12 @@ data class PermissionRequest(
             return PermissionRequest(
                 id = id,
                 sessionID = json.optString("sessionID"),
-                title = json.optString("title").ifBlank { json.optString("type", "需要授权") },
+                title = json.optString("title").ifBlank { json.optString("type", t("需要授权", "Permission required")) },
                 type = json.optString("type"),
                 pattern = when (val pattern = json.opt("pattern")) {
                     is String -> pattern
                     is JSONArray -> (0 until pattern.length()).joinToString(", ") { pattern.optString(it) }
+                    null -> ""
                     else -> ""
                 },
             )
@@ -143,7 +147,7 @@ object Parsers {
 
     fun session(json: JSONObject): SessionInfo = SessionInfo(
         id = json.optString("id"),
-        title = json.optString("title").ifBlank { "未命名会话" },
+        title = json.optString("title").ifBlank { t("未命名会话", "Untitled session") },
         directory = json.optString("directory"),
         created = json.optJSONObject("time")?.optLong("created") ?: 0L,
         updated = json.optJSONObject("time")?.optLong("updated") ?: 0L,
@@ -188,12 +192,18 @@ object Parsers {
         val data = json.optJSONObject("data")
         val message = data?.optString("message").orEmpty()
         return when (name) {
-            "ProviderAuthError" -> "模型认证失败（${data?.optString("providerID").orEmpty()}）：请到设置里检查 API Key"
-            "MessageAbortedError" -> "已中断"
-            "MessageOutputLengthError" -> "输出长度超限"
-            "APIError" -> "接口错误${data?.optInt("statusCode")?.takeIf { it > 0 }?.let { "（HTTP $it）" } ?: ""}：$message"
+            "ProviderAuthError" -> t(
+                "模型认证失败（${data?.optString("providerID").orEmpty()}）：请到设置里检查 API Key",
+                "Model authentication failed (${data?.optString("providerID").orEmpty()}): check the API key in Settings",
+            )
+            "MessageAbortedError" -> t("已中断", "Aborted")
+            "MessageOutputLengthError" -> t("输出长度超限", "Output length limit exceeded")
+            "APIError" -> t(
+                "接口错误${data?.optInt("statusCode")?.takeIf { it > 0 }?.let { "（HTTP $it）" } ?: ""}：$message",
+                "API error${data?.optInt("statusCode")?.takeIf { it > 0 }?.let { " (HTTP $it)" } ?: ""}: $message",
+            )
             "" -> null
-            else -> if (message.isNotBlank()) "$name：$message" else name
+            else -> if (message.isNotBlank()) "$name${I18n.t("：", ": ")}$message" else name
         }
     }
 

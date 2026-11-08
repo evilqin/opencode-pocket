@@ -2,7 +2,6 @@ package dev.pocket.opencode.ui.components
 
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -51,6 +50,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.pocket.opencode.core.ServerPhase
 import dev.pocket.opencode.ui.theme.CodeTextStyle
+import dev.pocket.opencode.ui.theme.LocalPocketAccents
 import dev.pocket.opencode.ui.theme.PocketColors
 
 /** 通用卡片：深色系 + 细边框 + 大圆角。 */
@@ -87,10 +87,11 @@ fun PocketCard(
 @Composable
 fun HeroCard(
     modifier: Modifier = Modifier,
-    accent: Color = PocketColors.Cyan,
+    accent: Color? = null,
     contentPadding: Dp = 20.dp,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val resolvedAccent = accent ?: LocalPocketAccents.current.cyan
     val shape = RoundedCornerShape(26.dp)
     Box(
         modifier
@@ -99,13 +100,13 @@ fun HeroCard(
             .background(
                 Brush.linearGradient(
                     listOf(
-                        accent.copy(alpha = 0.16f),
+                        resolvedAccent.copy(alpha = 0.16f),
                         MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.92f),
                         MaterialTheme.colorScheme.surfaceContainerHigh,
                     ),
                 ),
             )
-            .border(BorderStroke(1.dp, accent.copy(alpha = 0.28f)), shape),
+            .border(BorderStroke(1.dp, resolvedAccent.copy(alpha = 0.28f)), shape),
     ) {
         Column(Modifier.padding(contentPadding), content = content)
     }
@@ -205,10 +206,11 @@ fun StatusPill(text: String, color: Color, icon: ImageVector? = null) {
 /** 首页的状态指示球：运行中脉动。 */
 @Composable
 fun StatusOrb(phase: ServerPhase, size: Dp = 76.dp) {
+    val accents = LocalPocketAccents.current
     val color = when (phase) {
-        ServerPhase.RUNNING -> PocketColors.Emerald
-        ServerPhase.STARTING, ServerPhase.STOPPING -> PocketColors.Amber
-        ServerPhase.ERROR -> PocketColors.Rose
+        ServerPhase.RUNNING -> accents.emerald
+        ServerPhase.STARTING, ServerPhase.STOPPING -> accents.amber
+        ServerPhase.ERROR -> accents.rose
         ServerPhase.STOPPED -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val transition = rememberInfiniteTransition(label = "orb")
@@ -372,20 +374,21 @@ fun InlineBanner(
     icon: ImageVector,
     title: String,
     body: String? = null,
-    tone: Color = PocketColors.Cyan,
+    tone: Color? = null,
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
     onDismiss: (() -> Unit)? = null,
 ) {
+    val resolvedTone = tone ?: LocalPocketAccents.current.cyan
     Surface(
-        color = tone.copy(alpha = 0.1f),
+        color = resolvedTone.copy(alpha = 0.1f),
         shape = RoundedCornerShape(18.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, tone.copy(alpha = 0.25f), RoundedCornerShape(18.dp)),
+            .border(1.dp, resolvedTone.copy(alpha = 0.25f), RoundedCornerShape(18.dp)),
     ) {
         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, Modifier.size(20.dp), tint = tone)
+            Icon(icon, null, Modifier.size(20.dp), tint = resolvedTone)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.bodyMedium)

@@ -6,11 +6,10 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -30,15 +29,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.pocket.opencode.core.PocketEngine
 import dev.pocket.opencode.core.ServerPhase
+import dev.pocket.opencode.i18n.t
+import kotlinx.coroutines.launch
 
 sealed interface Route {
     val name: String
@@ -93,6 +93,12 @@ fun PocketRoot(engine: PocketEngine) {
     val install by engine.installer.state.collectAsStateWithLifecycle()
     val server by engine.server.status.collectAsStateWithLifecycle()
     val initialized by engine.initialized.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val darkTheme = when (settings.themeMode) {
+        "light" -> false
+        "dark" -> true
+        else -> isSystemInDarkTheme()
+    }
 
     // 用字符串保存路由，进程被回收后也能回到原来那一页
     var routeName by rememberSaveable { mutableStateOf(Route.HomeName) }
@@ -132,10 +138,10 @@ fun PocketRoot(engine: PocketEngine) {
     }
 
     val tabs = listOf(
-        Triple(Route.Home, "首页", Icons.Filled.Home),
-        Triple(Route.Chat, "对话", PocketIcons.Forum),
-        Triple(Route.Terminal, "终端", PocketIcons.Terminal),
-        Triple(Route.Settings, "设置", Icons.Filled.Settings),
+        Triple(Route.Home, t("首页", "Home"), Icons.Filled.Home),
+        Triple(Route.Chat, t("对话", "Chat"), PocketIcons.Forum),
+        Triple(Route.Terminal, t("终端", "Terminal"), PocketIcons.Terminal),
+        Triple(Route.Settings, t("设置", "Settings"), Icons.Filled.Settings),
     )
 
     Scaffold(
@@ -146,19 +152,21 @@ fun PocketRoot(engine: PocketEngine) {
                         Column {
                             Text(
                                 when (route) {
-                                    Route.Chat -> "对话"
-                                    Route.Terminal -> "终端与日志"
-                                    Route.Settings -> "设置"
-                                    else -> "OpenCode 口袋"
+                                    Route.Chat -> t("对话", "Chat")
+                                    Route.Terminal -> t("终端与日志", "Terminal & logs")
+                                    Route.Settings -> t("设置", "Settings")
+                                    else -> t("OpenCode 口袋", "OpenCode Pocket")
                                 },
                                 style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             val subtitle = when {
-                                server.phase == ServerPhase.RUNNING -> "运行中 · 127.0.0.1:${server.port}"
-                                install.installed -> "已安装，服务未启动"
-                                else -> "环境未安装"
+                                server.phase == ServerPhase.RUNNING -> t("运行中 · 127.0.0.1:${server.port}", "Running · 127.0.0.1:${server.port}")
+                                server.phase == ServerPhase.ERROR -> server.error ?: t("启动失败", "Failed to start")
+                                install.running != null -> install.message
+                                install.installed -> t("已安装，服务未启动", "Installed · server stopped")
+                                else -> t("环境未安装", "Environment not installed")
                             }
                             Text(
                                 subtitle,
@@ -168,9 +176,23 @@ fun PocketRoot(engine: PocketEngine) {
                         }
                     },
                     actions = {
+                        IconButton(onClick = {
+                            scope.launch {
+                                engine.settings.update { it.copy(themeMode = if (darkTheme) "light" else "dark") }
+                            }
+                        }) {
+                            Icon(
+                                if (darkTheme) PocketIcons.Sun else PocketIcons.Moon,
+                                if (darkTheme) {
+                                    t("切换到浅色模式", "Switch to light mode")
+                                } else {
+                                    t("切换到深色模式", "Switch to dark mode")
+                                },
+                            )
+                        }
                         if (route == Route.Home) {
                             IconButton(onClick = { engine.startServer(restart = true) }, enabled = install.installed) {
-                                Icon(Icons.Filled.Refresh, "重启服务")
+                                Icon(Icons.Filled.Refresh, t("重启服务", "Restart server"))
                             }
                         }
                     },
@@ -214,7 +236,7 @@ fun PocketRoot(engine: PocketEngine) {
                     Route.Terminal -> TerminalScreen(engine)
                     Route.Settings -> SettingsScreen(engine)
                     Route.Setup -> Column {
-                        ScreenTopBar(title = "安装环境", onBack = { routeName = Route.HomeName })
+                        ScreenTopBar(title = t("安装环境", "Install environment"), onBack = { routeName = Route.HomeName })
                         SetupScreen(engine) { routeName = Route.HomeName }
                     }
 
@@ -231,7 +253,7 @@ private fun ScreenTopBar(title: String, onBack: () -> Unit) {
     CenterAlignedTopAppBar(
         title = { Text(title, style = MaterialTheme.typography.titleMedium) },
         navigationIcon = {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, t("返回", "Back")) }
         },
     )
 }

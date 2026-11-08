@@ -8,6 +8,7 @@ import android.content.Intent
 import androidx.core.app.NotificationCompat
 import dev.pocket.opencode.MainActivity
 import dev.pocket.opencode.R
+import dev.pocket.opencode.i18n.t
 
 object Notifications {
 
@@ -18,10 +19,10 @@ object Notifications {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val server = NotificationChannel(
             CHANNEL_SERVER,
-            "服务运行状态",
+            t("服务运行状态", "Server status"),
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "显示内置 OpenCode 服务的运行状态"
+            description = t("显示内置 OpenCode 服务的运行状态", "Shows the status of the built-in OpenCode server")
             setShowBadge(false)
         }
         manager.createNotificationChannel(server)
@@ -56,7 +57,7 @@ object Notifications {
             .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_LOW)
         if (showStop) {
-            builder.addAction(0, "停止", stopIntent)
+            builder.addAction(0, t("停止", "Stop"), stopIntent)
         }
         return builder.build()
     }

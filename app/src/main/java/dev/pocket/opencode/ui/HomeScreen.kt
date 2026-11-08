@@ -1,13 +1,13 @@
 package dev.pocket.opencode.ui
 
+import dev.pocket.opencode.i18n.t
+
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -51,7 +51,7 @@ import dev.pocket.opencode.ui.components.PocketCard
 import dev.pocket.opencode.ui.components.SectionHeader
 import dev.pocket.opencode.ui.components.StatusOrb
 import dev.pocket.opencode.ui.components.StatusPill
-import dev.pocket.opencode.ui.theme.PocketColors
+import dev.pocket.opencode.ui.theme.LocalPocketAccents
 import dev.pocket.opencode.util.DevicePermissions
 import dev.pocket.opencode.util.Format
 import kotlinx.coroutines.Dispatchers
@@ -69,6 +69,7 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val accents = LocalPocketAccents.current
     val install by engine.installer.state.collectAsStateWithLifecycle()
     val versions by engine.installer.versions.collectAsStateWithLifecycle()
     val server by engine.server.status.collectAsStateWithLifecycle()
@@ -106,10 +107,10 @@ fun HomeScreen(
     ) {
         item {
             HeroCard(accent = when (server.phase) {
-                ServerPhase.RUNNING -> PocketColors.Emerald
-                ServerPhase.ERROR -> PocketColors.Rose
-                ServerPhase.STARTING, ServerPhase.STOPPING -> PocketColors.Amber
-                else -> PocketColors.Cyan
+                ServerPhase.RUNNING -> accents.emerald
+                ServerPhase.ERROR -> accents.rose
+                ServerPhase.STARTING, ServerPhase.STOPPING -> accents.amber
+                else -> accents.cyan
             }) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusOrb(server.phase, 72.dp)
@@ -117,11 +118,11 @@ fun HomeScreen(
                     Column(Modifier.weight(1f)) {
                         Text(
                             when (server.phase) {
-                                ServerPhase.RUNNING -> "服务运行中"
-                                ServerPhase.STARTING -> "正在启动…"
-                                ServerPhase.STOPPING -> "正在停止…"
-                                ServerPhase.ERROR -> "启动失败"
-                                ServerPhase.STOPPED -> if (install.installed) "已停止" else "环境未安装"
+                                ServerPhase.RUNNING -> t("服务运行中", "Server running")
+                                ServerPhase.STARTING -> t("正在启动…", "Starting…")
+                                ServerPhase.STOPPING -> t("正在停止…", "Stopping…")
+                                ServerPhase.ERROR -> t("启动失败", "Failed to start")
+                                ServerPhase.STOPPED -> if (install.installed) t("已停止", "Stopped") else t("环境未安装", "Environment not installed")
                             },
                             style = MaterialTheme.typography.headlineSmall,
                         )
@@ -129,11 +130,14 @@ fun HomeScreen(
                         Text(
                             when {
                                 server.phase == ServerPhase.RUNNING ->
-                                    "端口 ${server.port} · v${server.version.ifBlank { "?" }} · 已运行 ${Format.duration(now - server.startedAt)}"
+                                    t(
+                                        "端口 ${server.port} · v${server.version.ifBlank { "?" }} · 已运行 ${Format.duration(now - server.startedAt)}",
+                                        "Port ${server.port} · v${server.version.ifBlank { "?" }} · up ${Format.duration(now - server.startedAt)}",
+                                    )
                                 server.error != null -> server.error.orEmpty()
                                 install.running != null -> install.message
-                                install.installed -> "点一下就能开始写代码"
-                                else -> "先完成一次安装（约 5 分钟）"
+                                install.installed -> t("点一下就能开始写代码", "Tap to start coding")
+                                else -> t("先完成一次安装（约 5 分钟）", "Run the setup first (~5 minutes)")
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -146,7 +150,7 @@ fun HomeScreen(
                         Button(onClick = { showStopConfirm = true }) {
                             Icon(PocketIcons.Stop, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("停止")
+                            Text(t("停止", "Stop"))
                         }
                         FilledTonalButton(onClick = onOpenWeb) {
                             Icon(PocketIcons.Globe, null, Modifier.size(18.dp))
@@ -166,7 +170,7 @@ fun HomeScreen(
                                 Modifier.size(18.dp),
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text(if (install.installed) "启动服务" else "开始安装")
+                            Text(if (install.installed) t("启动服务", "Start server") else t("开始安装", "Start setup"))
                         }
                         if (install.installed) {
                             OutlinedButton(onClick = { engine.startServer(restart = true) }) {
@@ -182,20 +186,19 @@ fun HomeScreen(
 
         if (!install.installed) {
             item {
-                PocketCard(onClick = onOpenSetup) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(PocketIcons.Bolt, null, Modifier.size(22.dp), tint = PocketColors.Cyan)
+                PocketCard(onClick = onOpenSetup) {                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(PocketIcons.Bolt, null, Modifier.size(22.dp), tint = accents.cyan)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text("安装 Linux 运行环境", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                "自动下载 Ubuntu rootfs、基础工具与 OpenCode 本体",
+                                t("自动下载 Ubuntu rootfs、基础工具与 OpenCode 本体", "Downloads the Ubuntu rootfs, base tools and OpenCode automatically"),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                         val doneCount = install.steps.count { it.state == StepState.DONE }
-                        StatusPill("$doneCount/${install.steps.size}", PocketColors.Amber)
+                        StatusPill("$doneCount/${install.steps.size}", accents.amber)
                     }
                 }
             }
@@ -203,26 +206,26 @@ fun HomeScreen(
 
         item {
             Column {
-                SectionHeader("环境", "容器与工具链")
+                SectionHeader(t("环境", "Environment"), t("容器与工具链", "Container and toolchain"))
                 Spacer(Modifier.height(8.dp))
                 PocketCard {
-                    KeyValueRow("系统", versions["ubuntu"]?.let { "Ubuntu $it" } ?: "未安装")
-                    KeyValueRow("OpenCode", versions["opencode"] ?: "未安装")
-                    KeyValueRow("Node.js", versions["node"]?.let { "v${it.trimStart('v')}" } ?: "未安装（可选）")
+                    KeyValueRow(t("系统", "System"), versions["ubuntu"]?.let { "Ubuntu $it" } ?: t("未安装", "Not installed"))
+                    KeyValueRow("OpenCode", versions["opencode"] ?: t("未安装", "Not installed"))
+                    KeyValueRow("Node.js", versions["node"]?.let { "v${it.trimStart('v')}" } ?: t("未安装（可选）", "Not installed (optional)"))
                     KeyValueRow(
-                        "工作区",
-                        workspace?.let { it.host.absolutePath + if (it.external) "" else "（内部）" }
+                        t("工作区", "Workspace"),
+                        workspace?.let { it.host.absolutePath + if (it.external) "" else t("（内部）", " (internal)") }
                             ?: settings.workspace,
                     )
-                    KeyValueRow("占用空间", Format.bytes(diskUsage))
-                    KeyValueRow("模型", settings.defaultModel.ifBlank { "跟随默认" })
+                    KeyValueRow(t("占用空间", "Storage used"), Format.bytes(diskUsage))
+                    KeyValueRow(t("模型", "Model"), settings.defaultModel.ifBlank { t("跟随默认", "Follow default") })
                 }
             }
         }
 
         item {
             Column {
-                SectionHeader("快捷操作")
+                SectionHeader(t("快捷操作", "Quick actions"))
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     val updatingOpencode = install.running == dev.pocket.opencode.core.InstallStep.OPENCODE
@@ -266,13 +269,13 @@ fun HomeScreen(
             }
         }
 
-        if (!DevicePermissions.hasNotificationPermission(context)) {
+        if (install.installed && !DevicePermissions.hasNotificationPermission(context)) {
             item {
                 InlineBanner(
                     icon = Icons.Filled.Info,
-                    title = "开启通知权限",
-                    body = "服务运行状态会显示在通知栏，方便随时停止",
-                    actionLabel = "去开启",
+                    title = t("开启通知权限", "Enable notifications"),
+                    body = t("服务运行状态会显示在通知栏，方便随时停止", "Server status appears in the notification shade so you can stop it anytime"),
+                    actionLabel = t("去开启", "Enable"),
                     onAction = {
                         runCatching {
                             context.startActivity(
@@ -285,26 +288,26 @@ fun HomeScreen(
                 )
             }
         }
-        if (!DevicePermissions.hasAllFilesAccess()) {
+        if (install.installed && !DevicePermissions.hasAllFilesAccess()) {
             item {
                 InlineBanner(
                     icon = PocketIcons.Folder,
-                    title = "允许访问手机文件",
-                    body = "授权后容器里的 ${PocketPathsGuestWorkspace} 会直接挂到手机的 ${settings.workspace}",
-                    tone = PocketColors.Violet,
-                    actionLabel = "去授权",
+                    title = t("允许访问手机文件", "Allow access to phone files"),
+                    body = t("授权后容器里的 ${PocketPathsGuestWorkspace} 会直接挂到手机的 ${settings.workspace}", "After granting, ${PocketPathsGuestWorkspace} in the container maps to ${settings.workspace} on your phone"),
+                    tone = accents.violet,
+                    actionLabel = t("去授权", "Grant"),
                     onAction = { DevicePermissions.requestAllFilesAccess(context) },
                 )
             }
         }
-        if (!DevicePermissions.isIgnoringBatteryOptimizations(context)) {
+        if (install.installed && !DevicePermissions.isIgnoringBatteryOptimizations(context)) {
             item {
                 InlineBanner(
                     icon = Icons.Filled.Warning,
-                    title = "建议加入电池白名单",
-                    body = "否则长时间跑任务时系统可能把服务杀掉",
-                    tone = PocketColors.Amber,
-                    actionLabel = "去设置",
+                    title = t("建议加入电池白名单", "Add to battery allowlist"),
+                    body = t("否则长时间跑任务时系统可能把服务杀掉", "Otherwise the system may kill the server during long tasks"),
+                    tone = accents.amber,
+                    actionLabel = t("去设置", "Open settings"),
                     onAction = { DevicePermissions.requestIgnoreBatteryOptimizations(context) },
                 )
             }
@@ -313,14 +316,14 @@ fun HomeScreen(
         item {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    SectionHeader("最近日志", modifier = Modifier.weight(1f))
-                    TextButton(onClick = onOpenTerminal) { Text("查看全部") }
+                    SectionHeader(t("最近日志", "Recent logs"), modifier = Modifier.weight(1f))
+                    TextButton(onClick = onOpenTerminal) { Text(t("查看全部", "View all")) }
                 }
                 Spacer(Modifier.height(6.dp))
                 if (logs.isEmpty()) {
                     PocketCard {
                         Text(
-                            "还没有日志。安装或启动服务后，这里会实时显示输出。",
+                            t("还没有日志。安装或启动服务后，这里会实时显示输出。", "No logs yet. Output will appear here after installing or starting the server."),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -339,18 +342,18 @@ fun HomeScreen(
             if (failed.isNotEmpty()) {
                 InlineBanner(
                     icon = Icons.Filled.Warning,
-                    title = "${failed.first().step.title} 失败",
-                    body = failed.first().error ?: "可以到安装页单独重试这一步",
-                    tone = PocketColors.Rose,
-                    actionLabel = "去处理",
+                    title = t("${failed.first().step.title} 失败", "${failed.first().step.titleEn} failed"),
+                    body = failed.first().error ?: t("可以到安装页单独重试这一步", "Retry this step on the Setup tab"),
+                    tone = accents.rose,
+                    actionLabel = t("去处理", "Fix"),
                     onAction = onOpenSetup,
                 )
             } else if (install.installed) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.Check, null, Modifier.size(14.dp), tint = PocketColors.Emerald)
+                    Icon(Icons.Filled.Check, null, Modifier.size(14.dp), tint = accents.emerald)
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "环境自检通过 · 全部 ${install.steps.size} 项就绪",
+                        t("环境自检通过 · 全部 ${install.steps.size} 项就绪", "Environment check passed · all ${install.steps.size} steps ready"),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -366,17 +369,17 @@ fun HomeScreen(
     if (showStopConfirm) {
         AlertDialog(
             onDismissRequest = { showStopConfirm = false },
-            title = { Text("停止服务？") },
-            text = { Text("这会中断正在运行的会话与任务，网页版和终端都需要重新连接。") },
+            title = { Text(t("停止服务？", "Stop the server?")) },
+            text = { Text(t("这会中断正在运行的会话与任务，网页版和终端都需要重新连接。", "This interrupts running sessions and tasks. The web UI and terminal must reconnect.")) },
             confirmButton = {
                 TextButton(
                     onClick = {
                         showStopConfirm = false
                         engine.stopServer()
                     },
-                ) { Text("停止") }
+                ) { Text(t("停止", "Stop")) }
             },
-            dismissButton = { TextButton(onClick = { showStopConfirm = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { showStopConfirm = false }) { Text(t("取消", "Cancel")) } },
         )
     }
 }

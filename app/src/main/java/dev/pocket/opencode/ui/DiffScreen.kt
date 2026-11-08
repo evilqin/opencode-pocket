@@ -1,5 +1,7 @@
 package dev.pocket.opencode.ui
 
+import dev.pocket.opencode.i18n.t
+
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,7 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,7 +46,7 @@ import dev.pocket.opencode.data.UnifiedDiff
 import dev.pocket.opencode.ui.components.EmptyState
 import dev.pocket.opencode.ui.components.copyToClipboard
 import dev.pocket.opencode.ui.theme.CodeTextStyle
-import dev.pocket.opencode.ui.theme.PocketColors
+import dev.pocket.opencode.ui.theme.LocalPocketAccents
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 /**
@@ -75,19 +76,19 @@ fun DiffPanel(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconButton(onClick = { if (current != null) selected = null else onDismiss() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, if (current != null) "返回列表" else "关闭")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, if (current != null) t("返回列表", "Back to list") else t("关闭", "Close"))
                     }
                     Column(Modifier.weight(1f)) {
                         Text(
-                            current?.shortName ?: "本次改动",
+                            current?.shortName ?: t("本次改动", "Changes"),
                             style = MaterialTheme.typography.titleSmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         val subtitle = when {
                             current != null -> "+${current.additions} -${current.deletions} · ${current.file}"
-                            diffs.isNotEmpty() -> "${diffs.size} 个文件 · +${diffs.sumOf { it.additions }} -${diffs.sumOf { it.deletions }}"
-                            else -> "agent 还没有改动过文件"
+                            diffs.isNotEmpty() -> t("${diffs.size} 个文件 · +${diffs.sumOf { it.additions }} -${diffs.sumOf { it.deletions }}", "${diffs.size} files · +${diffs.sumOf { it.additions }} -${diffs.sumOf { it.deletions }}")
+                            else -> t("agent 还没有改动过文件", "The agent hasn't changed any files yet")
                         }
                         Text(
                             subtitle,
@@ -98,7 +99,7 @@ fun DiffPanel(
                         )
                     }
                     if (current == null) {
-                        IconButton(onClick = onReload) { Icon(Icons.Filled.Refresh, "刷新") }
+                        IconButton(onClick = onReload) { Icon(Icons.Filled.Refresh, t("刷新", "Refresh")) }
                     }
                 }
             }
@@ -111,14 +112,14 @@ fun DiffPanel(
 
                     error != null && diffs.isEmpty() -> EmptyState(
                         icon = PocketIcons.Shield,
-                        title = "拿不到改动列表",
+                        title = t("拿不到改动列表", "Couldn't load changes"),
                         body = error,
                     )
 
                     diffs.isEmpty() -> EmptyState(
                         icon = PocketIcons.Code,
-                        title = "还没有文件改动",
-                        body = "让 opencode 写点代码，改过的文件会出现在这里（支持查看每一行的增删）",
+                        title = t("还没有文件改动", "No file changes yet"),
+                        body = t("让 opencode 写点代码，改过的文件会出现在这里（支持查看每一行的增删）", "Ask opencode to write some code; changed files appear here with per-line diffs"),
                     )
 
                     current != null -> DiffDetail(current)
@@ -128,7 +129,7 @@ fun DiffPanel(
                         contentPadding = PaddingValues(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        items(diffs, key = { it.file }) { diff ->
+                        itemsIndexed(diffs) { _, diff ->
                             FileDiffRow(diff) { selected = diff }
                         }
                     }
@@ -140,6 +141,7 @@ fun DiffPanel(
 
 @Composable
 private fun FileDiffRow(diff: FileDiffInfo, onClick: () -> Unit) {
+    val accents = LocalPocketAccents.current
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
         shape = RoundedCornerShape(12.dp),
@@ -165,19 +167,19 @@ private fun FileDiffRow(diff: FileDiffInfo, onClick: () -> Unit) {
                 )
             }
             Spacer(Modifier.width(10.dp))
-            if (diff.isNew) StatusTag("新增", PocketColors.Emerald)
-            if (diff.isDeleted) StatusTag("删除", PocketColors.Rose)
+            if (diff.isNew) StatusTag(t("新增", "New"), accents.emerald)
+            if (diff.isDeleted) StatusTag(t("删除", "Deleted"), accents.rose)
             Text(
                 "+${diff.additions}",
                 style = MaterialTheme.typography.labelMedium,
-                color = PocketColors.Emerald,
+                color = accents.emerald,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.width(8.dp))
             Text(
                 "-${diff.deletions}",
                 style = MaterialTheme.typography.labelMedium,
-                color = PocketColors.Rose,
+                color = accents.rose,
                 fontWeight = FontWeight.SemiBold,
             )
         }
@@ -198,6 +200,7 @@ private fun StatusTag(text: String, color: Color) {
 
 @Composable
 private fun DiffDetail(diff: FileDiffInfo) {
+    val accents = LocalPocketAccents.current
     val context = androidx.compose.ui.platform.LocalContext.current
     // 差分计算可能涉及大文本，放到 Default 线程，避免阻塞主线程
     val lines by produceState<List<UnifiedDiff.Line>?>(null, diff.file, diff.before, diff.after) {
@@ -219,11 +222,11 @@ private fun DiffDetail(diff: FileDiffInfo) {
         // 服务端可能只给了统计（before/after 被省略）
         EmptyState(
             icon = PocketIcons.Code,
-            title = if (diff.additions + diff.deletions > 0) "只能看到统计" else "内容没有变化",
+            title = if (diff.additions + diff.deletions > 0) t("只能看到统计", "Only stats available") else t("内容没有变化", "No content change"),
             body = if (diff.additions + diff.deletions > 0) {
-                "服务端没有返回文件内容，仅 +${diff.additions} -${diff.deletions}；可以用终端里的 git diff 查看"
+                t("服务端没有返回文件内容，仅 +${diff.additions} -${diff.deletions}；可以用终端里的 git diff 查看", "The server returned no file content, only +${diff.additions} -${diff.deletions}; use git diff in the terminal")
             } else {
-                "这个文件的 before/after 完全一致"
+                t("这个文件的 before/after 完全一致", "This file's before/after are identical")
             },
         )
         return
@@ -234,15 +237,15 @@ private fun DiffDetail(diff: FileDiffInfo) {
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(vertical = 6.dp)) {
             itemsIndexed(computed) { index, line ->
                 val background = when (line) {
-                    is UnifiedDiff.Line.Add -> PocketColors.Emerald.copy(alpha = 0.12f)
-                    is UnifiedDiff.Line.Remove -> PocketColors.Rose.copy(alpha = 0.12f)
+                    is UnifiedDiff.Line.Add -> accents.emerald.copy(alpha = 0.12f)
+                    is UnifiedDiff.Line.Remove -> accents.rose.copy(alpha = 0.12f)
                     is UnifiedDiff.Line.Hunk -> MaterialTheme.colorScheme.surfaceContainerHigh
                     is UnifiedDiff.Line.Note -> MaterialTheme.colorScheme.surfaceContainer
                     is UnifiedDiff.Line.Context -> Color.Transparent
                 }
                 val tint = when (line) {
-                    is UnifiedDiff.Line.Add -> PocketColors.Emerald
-                    is UnifiedDiff.Line.Remove -> PocketColors.Rose
+                    is UnifiedDiff.Line.Add -> accents.emerald
+                    is UnifiedDiff.Line.Remove -> accents.rose
                     is UnifiedDiff.Line.Hunk -> MaterialTheme.colorScheme.primary
                     is UnifiedDiff.Line.Note -> MaterialTheme.colorScheme.onSurfaceVariant
                     is UnifiedDiff.Line.Context -> MaterialTheme.colorScheme.onSurface
@@ -276,11 +279,11 @@ private fun DiffDetail(diff: FileDiffInfo) {
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = { copyToClipboard(context, UnifiedDiff.render(computed), "差分已复制") }) {
-                    Text("复制差分")
+                TextButton(onClick = { copyToClipboard(context, UnifiedDiff.render(computed), t("差分已复制", "Diff copied")) }) {
+                    Text(t("复制差分", "Copy diff"))
                 }
-                TextButton(onClick = { copyToClipboard(context, diff.after, "新文件内容已复制") }) {
-                    Text("复制新内容")
+                TextButton(onClick = { copyToClipboard(context, diff.after, t("新文件内容已复制", "New content copied")) }) {
+                    Text(t("复制新内容", "Copy new content"))
                 }
                 Spacer(Modifier.weight(1f))
                 Text(

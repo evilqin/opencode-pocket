@@ -171,4 +171,31 @@ object PocketIcons {
             stroke("M12,3.6c2.6,2.6 2.6,14.2 0,16.8 -2.6,-2.6 -2.6,-14.2 0,-16.8z")
         }
     }
+
+    val Sun: ImageVector by lazy {
+        vector("sun") {
+            stroke("M12,12m-4,0a4,4 0 1,0 8,0a4,4 0 1,0 -8,0")
+            stroke("M12,2.8v2.4M12,18.8v2.4M2.8,12h2.4M18.8,12h2.4M5.5,5.5l1.7,1.7M16.8,16.8l1.7,1.7M18.5,5.5l-1.7,1.7M7.2,16.8l-1.7,1.7")
+        }
+    }
+
+    val Moon: ImageVector by lazy {
+        vector("moon") {
+            stroke("M20.2,14.2A8.4,8.4 0 0 1 9.8,3.8a8.4,8.4 0 1 0 10.4,10.4z")
+        }
+    }
+
+    val Auto: ImageVector by lazy {
+        vector("auto") {
+            stroke("M12,12m-8.4,0a8.4,8.4 0 1,0 16.8,0a8.4,8.4 0 1,0 -16.8,0")
+            fill("M12,3.6a8.4,8.4 0 0 1 0,16.8z")
+        }
+    }
+
+    val Translate: ImageVector by lazy {
+        vector("translate") {
+            stroke("M3.6,5.6h8.2M7.7,3.6v2M5.2,5.6c0.7,3.2 2.8,5.7 5.8,7M10.6,5.6c-0.6,3.3 -2.7,5.8 -5.8,7.2")
+            stroke("M12.6,20.4l3.7,-8.6 3.7,8.6M13.9,17.5h4.9")
+        }
+    }
 }

@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.I18n
+
 /**
  * 危险命令防护：设备 Shell 桥（dexec）执行前的最后一道闸门。
  *
@@ -20,50 +22,52 @@ object CommandGuard {
         Regex("""settings\s+put\s+global\s+settings_enable_monitor_phantom_procs\b"""),
     )
 
-    private data class Rule(val pattern: Regex, val reason: String)
+    private data class Rule(val pattern: Regex, val reason: String, val reasonEn: String)
 
     /**
      * 结构性规则：与具体动词无关，「怎么执行」本身就可疑的写法。
      * 在**整条命令**（规范化后）上匹配，不受分段影响。
      */
     private val structuralRules = listOf(
-        Rule(Regex("""\b(sh|bash|zsh|ksh|dash)\s+-c\b"""), "通过子 shell 解释字符串执行（sh -c）"),
-        Rule(Regex("""\|\s*(sh|bash|zsh|ksh)\b"""), "把内容管道给 shell 执行"),
-        Rule(Regex("""\b(eval|exec)\b\s"""), "动态执行（eval/exec）"),
-        Rule(Regex("""\$\("""), "命令替换 $() ——可能隐藏真实命令"),
-        Rule(Regex("""`"""), "反引号命令替换 ——可能隐藏真实命令"),
-        Rule(Regex("""\bfind\b[^;|]*(?:-delete\b|-exec\b)"""), "find 的删除/执行动作"),
-        Rule(Regex("""\bxargs\b[^;|]*\b(rm|sh|bash)\b"""), "xargs 调用危险命令"),
+        Rule(Regex("""\b(sh|bash|zsh|ksh|dash)\s+-c\b"""), "通过子 shell 解释字符串执行（sh -c）", "executes a string through a subshell (sh -c)"),
+        Rule(Regex("""\|\s*(sh|bash|zsh|ksh)\b"""), "把内容管道给 shell 执行", "pipes content into a shell"),
+        Rule(Regex("""\b(eval|exec)\b\s"""), "动态执行（eval/exec）", "dynamic execution (eval/exec)"),
+        Rule(Regex("""\$\("""), "命令替换 $() ——可能隐藏真实命令", "command substitution $() can hide the real command"),
+        Rule(Regex("""`"""), "反引号命令替换 ——可能隐藏真实命令", "backtick command substitution can hide the real command"),
+        Rule(Regex("""\bfind\b[^;|]*(?:-delete\b|-exec\b)"""), "find 的删除/执行动作", "find delete/exec action"),
+        Rule(Regex("""\bxargs\b[^;|]*\b(rm|sh|bash)\b"""), "xargs 调用危险命令", "xargs invokes a dangerous command"),
     )
 
     /** 常规规则：按 `;`/`&&`/`|`/`&` 分段后逐段匹配。 */
     private val rules = listOf(
-        Rule(Regex("""\brm\b(\s+(-{1,2}[A-Za-z][\w=.-]*))*\s+/(\*)?(\s|$)"""), "删除文件系统根目录"),
+        Rule(Regex("""\brm\b(\s+(-{1,2}[A-Za-z][\w=.-]*))*\s+/(\*)?(\s|$)"""), "删除文件系统根目录", "deletes the filesystem root"),
         Rule(
             Regex("""\brm\b(\s+(-{1,2}[A-Za-z][\w=.-]*))*\s+/(data|system|vendor|sdcard|storage|etc|bin|usr|lib|opt|root)(/\*)?(\s|$)"""),
             "删除系统/共享存储目录",
+            "deletes a system or shared-storage directory",
         ),
         Rule(
             Regex("""\brm\b(\s+(-{1,2}[A-Za-z][\w=.-]*))*\s+/sdcard/(DCIM|Pictures|Movies|Music|Android)(/|\s|$)"""),
             "删除相册/系统共享目录",
+            "deletes a photo album or shared system directory",
         ),
-        Rule(Regex("""\brm\b[^;|]*\s/[^;|]*\.\."""), "rm 的绝对路径目标里带 ..（路径穿越）"),
-        Rule(Regex("""\bmkfs(\.\w+)?\b"""), "格式化文件系统"),
-        Rule(Regex("""\bdd\b[^\n]*\bof=/dev/block/"""), "直接写块设备"),
-        Rule(Regex("""\bdd\b[^\n]*\bof=/dev/\w"""), "直接写设备节点"),
-        Rule(Regex("""\bpm\s+(uninstall|disable|clear|hide|suspend)\b"""), "卸载/禁用/清空应用"),
-        Rule(Regex("""\bam\s+force-stop\s+com\.android\b"""), "强停系统组件"),
-        Rule(Regex("""\b(content|settings)\s+(delete|put)\b"""), "修改系统设置/数据库（幻影进程那条除外）"),
-        Rule(Regex("""\b(reboot|shutdown|halt|poweroff)\b"""), "重启/关机"),
-        Rule(Regex("""\bmount\b[^\n]*\b(remount|rw)\b"""), "重新挂载分区为可写"),
-        Rule(Regex("""\bchmod\b[^\n]*\s/(system|vendor|data)\b"""), "修改系统目录权限"),
-        Rule(Regex("""\b(wipe|fastboot|flash)\b"""), "刷机/擦除类命令"),
-        Rule(Regex("""\bsu\b\s+-?c?\s"""), "提权（桥已经是 shell/root 身份，无需 su）"),
-        Rule(Regex("""\s*/(system|vendor)/"""), "覆盖系统分区文件"),
-        Rule(Regex("""\bkillall\b|\bkill\s+-9\s+1\b"""), "批量杀进程"),
+        Rule(Regex("""\brm\b[^;|]*\s/[^;|]*\.\."""), "rm 的绝对路径目标里带 ..（路径穿越）", "rm target has .. path traversal"),
+        Rule(Regex("""\bmkfs(\.\w+)?\b"""), "格式化文件系统", "formats a filesystem"),
+        Rule(Regex("""\bdd\b[^\n]*\bof=/dev/block/"""), "直接写块设备", "writes directly to a block device"),
+        Rule(Regex("""\bdd\b[^\n]*\bof=/dev/\w"""), "直接写设备节点", "writes directly to a device node"),
+        Rule(Regex("""\bpm\s+(uninstall|disable|clear|hide|suspend)\b"""), "卸载/禁用/清空应用", "uninstalls, disables or clears an app"),
+        Rule(Regex("""\bam\s+force-stop\s+com\.android\b"""), "强停系统组件", "force-stops a system component"),
+        Rule(Regex("""\b(content|settings)\s+(delete|put)\b"""), "修改系统设置/数据库（幻影进程那条除外）", "modifies system settings/database (except the phantom-process entry)"),
+        Rule(Regex("""\b(reboot|shutdown|halt|poweroff)\b"""), "重启/关机", "reboots or powers off the device"),
+        Rule(Regex("""\bmount\b[^\n]*\b(remount|rw)\b"""), "重新挂载分区为可写", "remounts a partition read-write"),
+        Rule(Regex("""\bchmod\b[^\n]*\s/(system|vendor|data)\b"""), "修改系统目录权限", "changes permissions on a system directory"),
+        Rule(Regex("""\b(wipe|fastboot|flash)\b"""), "刷机/擦除类命令", "flashing or wiping command"),
+        Rule(Regex("""\bsu\b\s+-?c?\s"""), "提权（桥已经是 shell/root 身份，无需 su）", "privilege escalation (the bridge already runs as shell/root)"),
+        Rule(Regex("""\s*/(system|vendor)/"""), "覆盖系统分区文件", "overwrites files in a system partition"),
+        Rule(Regex("""\bkillall\b|\bkill\s+-9\s+1\b"""), "批量杀进程", "kills processes in bulk"),
         // 「动词被拆出来单独用」的间接形式，补在最后：pm 等包名被变量绕开也躲不过这层
-        Rule(Regex("""\buninstall\b"""), "卸载应用（uninstall）"),
-        Rule(Regex("""\bwipe\s+(data|userdata|cache)\b"""), "擦除数据（wipe）"),
+        Rule(Regex("""\buninstall\b"""), "卸载应用（uninstall）", "uninstalls an app"),
+        Rule(Regex("""\bwipe\s+(data|userdata|cache)\b"""), "擦除数据（wipe）", "wipes data"),
     )
 
     /**
@@ -94,7 +98,10 @@ object CommandGuard {
     }
 
     private fun describe(rule: Rule): String =
-        "${rule.reason}（命中防护规则 ${rule.pattern.pattern.take(48)}）"
+        I18n.t(
+            "${rule.reason}（命中防护规则 ${rule.pattern.pattern.take(48)}）",
+            "${rule.reasonEn} (matched guard rule ${rule.pattern.pattern.take(48)})",
+        )
 
     /**
      * 规范化：把常见的「绕写」还原成常规形式，再交给规则匹配。

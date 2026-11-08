@@ -1,5 +1,6 @@
 package dev.pocket.opencode.ui.theme
 
+import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -9,15 +10,26 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 
-/** OpenCode Pocket 的配色：深色为主，青色是主品牌色，紫色做强调。 */
+/**
+ * OpenCode Pocket 的品牌色。
+ *
+ * 深色主题直接使用高饱和的霓虹色；浅色主题需要更深的同色系（见 [LightAccents]），
+ * 否则青色/琥珀色文字在白底上几乎看不清。界面里请通过 [LocalPocketAccents]
+ * 取强调色，不要直接引用这里的常量。
+ */
 object PocketColors {
     val Cyan = Color(0xFF22D3EE)
     val CyanDeep = Color(0xFF0891B2)
@@ -30,6 +42,35 @@ object PocketColors {
     val DarkSurface = Color(0xFF101A2B)
     val DarkSurfaceHigh = Color(0xFF18243A)
 }
+
+/** 随主题变化的强调色板。 */
+@Immutable
+data class PocketAccents(
+    val cyan: Color,
+    val violet: Color,
+    val emerald: Color,
+    val amber: Color,
+    val rose: Color,
+)
+
+val DarkAccents = PocketAccents(
+    cyan = PocketColors.Cyan,
+    violet = PocketColors.Violet,
+    emerald = PocketColors.Emerald,
+    amber = PocketColors.Amber,
+    rose = PocketColors.Rose,
+)
+
+/** 浅色底上用更深的一档，保证小字号也有足够对比度。 */
+val LightAccents = PocketAccents(
+    cyan = Color(0xFF0E7490),
+    violet = Color(0xFF6D28D9),
+    emerald = Color(0xFF047857),
+    amber = Color(0xFFB45309),
+    rose = Color(0xFFBE123C),
+)
+
+val LocalPocketAccents = staticCompositionLocalOf { DarkAccents }
 
 private val DarkScheme = darkColorScheme(
     primary = PocketColors.Cyan,
@@ -72,6 +113,8 @@ private val LightScheme = lightColorScheme(
     onSecondaryContainer = Color(0xFF23005C),
     tertiary = Color(0xFF047857),
     onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFD1FAE5),
+    onTertiaryContainer = Color(0xFF002117),
     background = Color(0xFFF5F8FD),
     onBackground = Color(0xFF0F172A),
     surface = Color(0xFFFFFFFF),
@@ -84,6 +127,9 @@ private val LightScheme = lightColorScheme(
     outline = Color(0xFFB6C2D6),
     outlineVariant = Color(0xFFD3DCEA),
     error = Color(0xFFD64256),
+    onError = Color.White,
+    errorContainer = Color(0xFFFFE0E4),
+    onErrorContainer = Color(0xFF5F0A18),
 )
 
 private val Mono = FontFamily.Monospace
@@ -107,7 +153,7 @@ val CodeTextStyle = TextStyle(fontFamily = Mono, fontSize = 12.5.sp, lineHeight 
 
 @Composable
 fun PocketTheme(
-    themeMode: String = "dark",
+    themeMode: String = "system",
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
@@ -123,16 +169,32 @@ fun PocketTheme(
         dark -> DarkScheme
         else -> LightScheme
     }
-    MaterialTheme(
-        colorScheme = scheme,
-        typography = PocketTypography,
-        shapes = androidx.compose.material3.Shapes(
-            extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-            small = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-            medium = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
-            large = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
-            extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(28.dp),
-        ),
-        content = content,
-    )
+
+    // enableEdgeToEdge() 只会在 Activity 创建时按系统深浅色决定状态栏图标；
+    // 应用内切换主题后必须同步翻转，否则浅色主题下会出现「白图标压白背景」。
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? Activity)?.window ?: return@SideEffect
+            WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
+    }
+
+    androidx.compose.runtime.CompositionLocalProvider(LocalPocketAccents provides if (dark) DarkAccents else LightAccents) {
+        MaterialTheme(
+            colorScheme = scheme,
+            typography = PocketTypography,
+            shapes = androidx.compose.material3.Shapes(
+                extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+                small = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                medium = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                large = androidx.compose.foundation.shape.RoundedCornerShape(22.dp),
+                extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(28.dp),
+            ),
+            content = content,
+        )
+    }
 }

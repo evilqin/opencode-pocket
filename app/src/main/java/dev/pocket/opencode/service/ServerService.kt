@@ -1,14 +1,19 @@
 package dev.pocket.opencode.service
 
+import android.Manifest
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import dev.pocket.opencode.PocketApp
 import dev.pocket.opencode.core.ServerPhase
+import dev.pocket.opencode.i18n.t
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,14 +52,14 @@ class ServerService : Service() {
                 Notifications.ID_SERVER,
                 Notifications.serverNotification(
                     this,
-                    title = "OpenCode 口袋",
-                    text = "准备中…",
+                    title = t("OpenCode 口袋", "OpenCode Pocket"),
+                    text = t("准备中…", "Preparing…"),
                     running = true,
                 ),
             )
         }.isSuccess
         if (!foregroundOk) {
-            Log.w(TAG, "startForeground 失败，停止服务")
+            Log.w(TAG, t("startForeground 失败，停止服务", "startForeground failed; stopping the service"))
             releaseWakeLock()
             runCatching { stopSelf() }
             return START_NOT_STICKY
@@ -126,29 +131,34 @@ class ServerService : Service() {
                 }
                 val text = when (status.phase) {
                     ServerPhase.RUNNING -> "127.0.0.1:${status.port}  ·  v${status.version.ifBlank { "?" }}"
-                    ServerPhase.STARTING -> status.hint.ifBlank { "启动中…" }
-                    ServerPhase.STOPPING -> "正在停止…"
-                    ServerPhase.ERROR -> status.error ?: "出错了"
-                    ServerPhase.STOPPED -> "已停止"
+                    ServerPhase.STARTING -> status.hint.ifBlank { t("启动中…", "Starting…") }
+                    ServerPhase.STOPPING -> t("正在停止…", "Stopping…")
+                    ServerPhase.ERROR -> status.error ?: t("出错了", "Something went wrong")
+                    ServerPhase.STOPPED -> t("已停止", "Stopped")
                 }
                 val title = when (status.phase) {
-                    ServerPhase.RUNNING -> "OpenCode 运行中"
-                    ServerPhase.STARTING -> "OpenCode 启动中"
-                    ServerPhase.ERROR -> "OpenCode 启动失败"
-                    else -> "OpenCode 口袋"
+                    ServerPhase.RUNNING -> t("OpenCode 运行中", "OpenCode running")
+                    ServerPhase.STARTING -> t("OpenCode 启动中", "OpenCode starting")
+                    ServerPhase.ERROR -> t("OpenCode 启动失败", "OpenCode failed to start")
+                    else -> t("OpenCode 口袋", "OpenCode Pocket")
                 }
-                runCatching {
-                    NotificationManagerCompat.from(this@ServerService).notify(
-                        Notifications.ID_SERVER,
-                        Notifications.serverNotification(
-                            this@ServerService,
-                            title = title,
-                            text = text,
-                            // 失败态也别做成不可划掉的常驻通知：允许停止，也允许划走
-                            running = status.phase == ServerPhase.RUNNING || status.phase == ServerPhase.STARTING,
-                            showStop = status.phase != ServerPhase.STOPPED,
-                        ),
-                    )
+                val canNotify = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                    ContextCompat.checkSelfPermission(this@ServerService, Manifest.permission.POST_NOTIFICATIONS) ==
+                    PackageManager.PERMISSION_GRANTED
+                if (canNotify) {
+                    runCatching {
+                        NotificationManagerCompat.from(this@ServerService).notify(
+                            Notifications.ID_SERVER,
+                            Notifications.serverNotification(
+                                this@ServerService,
+                                title = title,
+                                text = text,
+                                // 失败态也别做成不可划掉的常驻通知：允许停止，也允许划走
+                                running = status.phase == ServerPhase.RUNNING || status.phase == ServerPhase.STARTING,
+                                showStop = status.phase != ServerPhase.STOPPED,
+                            ),
+                        )
+                    }
                 }
             }
         }

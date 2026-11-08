@@ -2,6 +2,8 @@ package dev.pocket.opencode.core
 
 import android.content.Context
 import android.system.Os
+import dev.pocket.opencode.i18n.I18n
+import dev.pocket.opencode.i18n.t
 import java.io.File
 import java.io.RandomAccessFile
 import java.text.SimpleDateFormat
@@ -36,7 +38,32 @@ enum class InstallStep(
     TOOLS("tools", "基础工具", "git / curl / ripgrep 等（走镜像源 apt）"),
     NODE("node", "Node.js（可选）", "LTS 版本，插件与 npm 项目会用到", optional = true),
     OPENCODE("opencode", "OpenCode 本体", "下载官方 linux-arm64 可执行文件"),
-    CONFIG("config", "容器配置", "写入 shell 环境、npm 源与 opencode 配置"),
+    CONFIG("config", "容器配置", "写入 shell 环境、npm 源与 opencode 配置");
+
+    /** 英文文案（枚举在类加载时创建，不能直接调用 t()，否则会锁死当时的语言）。 */
+    val titleEn: String
+        get() = when (this) {
+            BOOT -> "Runtime ready"
+            ROOTFS -> "Ubuntu rootfs"
+            TOOLS -> "Base tools"
+            NODE -> "Node.js (optional)"
+            OPENCODE -> "OpenCode"
+            CONFIG -> "Container config"
+        }
+
+    val subtitleEn: String
+        get() = when (this) {
+            BOOT -> "Bundled proot and shared libraries"
+            ROOTFS -> "Download and extract the arm64 base system (~30 MB)"
+            TOOLS -> "git / curl / ripgrep and more (via apt mirror)"
+            NODE -> "LTS build for plugins and npm projects"
+            OPENCODE -> "Download the official linux-arm64 executable"
+            CONFIG -> "Write shell environment, npm registry and opencode config"
+        }
+
+    /** 当前语言下的标题/副标题。 */
+    val titleText: String get() = I18n.t(title, titleEn)
+    val subtitleText: String get() = I18n.t(subtitle, subtitleEn)
 }
 
 enum class StepState { PENDING, RUNNING, DONE, FAILED, SKIPPED }
@@ -148,9 +175,9 @@ class Installer(
         val started = scope.launch {
             try {
                 for (step in steps) {
-                    if (cancelRequested) throw CancellationException("已取消")
+                    if (cancelRequested) throw CancellationException(t("已取消", "Cancelled"))
                     if (step == InstallStep.NODE && !current.installNode) {
-                        updateStep(step, StepState.SKIPPED, detail = "已跳过")
+                        updateStep(step, StepState.SKIPPED, detail = t("已跳过", "Skipped"))
                         continue
                     }
                     // 任何一步都先把内置运行时铺好（幂等），避免用户只重跑某一步时缺依赖
@@ -158,23 +185,23 @@ class Installer(
                     markRunning(step)
                     val detail = withContext(Dispatchers.IO) { runStep(step, current) }
                     updateStep(step, StepState.DONE, detail = detail, progress = 1f)
-                    log("✔ ${step.title}：完成（$detail）")
+                    log(t("✔ ${step.title}：完成（$detail）", "✔ ${step.titleEn}: done ($detail)"))
                 }
-                _state.update { it.copy(running = null, message = "安装完成") }
+                _state.update { it.copy(running = null, message = t("安装完成", "Installation complete")) }
             } catch (cancelled: CancellationException) {
                 // 被取消的步骤不能留在 RUNNING：它已经不会继续跑了，界面得允许重试
                 _state.value.running?.let { step ->
-                    updateStep(step, StepState.PENDING, detail = "已取消")
+                    updateStep(step, StepState.PENDING, detail = t("已取消", "Cancelled"))
                 }
-                _state.update { it.copy(running = null, message = "已取消") }
+                _state.update { it.copy(running = null, message = t("已取消", "Cancelled")) }
                 throw cancelled
             } catch (error: Exception) {
                 val running = _state.value.running
                 if (running != null) {
                     updateStep(running, StepState.FAILED, error = error.message ?: error.toString())
-                    log("✘ ${running.title}：失败 — ${error.message}")
+                    log(t("✘ ${running.title}：失败 — ${error.message}", "✘ ${running.titleEn}: failed — ${error.message}"))
                 }
-                _state.update { it.copy(running = null, message = error.message ?: "安装失败") }
+                _state.update { it.copy(running = null, message = error.message ?: t("安装失败", "Installation failed")) }
             } finally {
                 // 取消时这里也在取消的协程里：必须用 NonCancellable，否则状态刷不回去
                 withContext(NonCancellable) {
@@ -190,7 +217,7 @@ class Installer(
 
     fun cancel() {
         cancelRequested = true
-        _state.update { it.copy(message = "正在取消…") }
+        _state.update { it.copy(message = t("正在取消…", "Cancelling…")) }
     }
 
     /** 更新 opencode 到最新版（只跑 OPENCODE 步骤）。 */
@@ -213,13 +240,13 @@ class Installer(
     suspend fun uninstallEnvironment() = withContext(Dispatchers.IO) {
         if (isBusy) {
             cancel()
-            log("等待当前任务停止后再清理…")
+            log(t("等待当前任务停止后再清理…", "Waiting for the current task to stop before cleaning up…"))
             runCatching { job?.join() }
             if (job?.isActive == true) {
-                throw IllegalStateException("安装任务还在运行，请稍后再试")
+                throw IllegalStateException(t("安装任务还在运行，请稍后再试", "An install task is still running; try again later"))
             }
         }
-        log("开始清理容器环境…")
+        log(t("开始清理容器环境…", "Cleaning the container environment…"))
         FileOps.deleteTree(paths.rootfs)
         // 半途留下的中间目录也要清，否则「已删除」之后还能剩几百 MB
         FileOps.deleteTree(File(paths.home, "ubuntu.new"))
@@ -231,7 +258,7 @@ class Installer(
         paths.stateFile.delete()
         _state.value = InstallSnapshot()
         _versions.value = emptyMap()
-        log("容器环境已删除（工作区文件不受影响）")
+        log(t("容器环境已删除（工作区文件不受影响）", "Container environment deleted (workspace files are untouched)"))
     }
 
     /** 读取可展示的版本信息。 */
@@ -263,10 +290,10 @@ class Installer(
     }
 
     private suspend fun stepBoot(): String {
-        log("准备 proot 运行时…")
+        log(t("准备 proot 运行时…", "Preparing the proot runtime…"))
         proot.stageBootRuntime()
-        log("proot: ${paths.prootBin.length()} 字节，loader: ${paths.prootLoader.length()} 字节")
-        return "proot 已就绪"
+        log(t("proot: ${paths.prootBin.length()} 字节，loader: ${paths.prootLoader.length()} 字节", "proot: ${paths.prootBin.length()} bytes, loader: ${paths.prootLoader.length()} bytes"))
+        return t("proot 已就绪", "proot is ready")
     }
 
     private suspend fun stepRootfs(config: AppSettings): String {
@@ -274,20 +301,20 @@ class Installer(
         val free = freeSpaceBytes()
         if (free > 0 && free < MIN_FREE_BYTES) {
             throw IllegalStateException(
-                "存储空间不足：至少需要 ${MIN_FREE_BYTES / 1024 / 1024} MB 空闲（当前 ${free / 1024 / 1024} MB）",
+                t("存储空间不足：至少需要 ${MIN_FREE_BYTES / 1024 / 1024} MB 空闲（当前 ${free / 1024 / 1024} MB）", "Not enough storage: need at least ${MIN_FREE_BYTES / 1024 / 1024} MB free (currently ${free / 1024 / 1024} MB)"),
             )
         }
         val mirror = Mirrors.find(Mirrors.ubuntu, config.ubuntuMirror)
-        setProgress(0.01f, "查找镜像文件…")
+        setProgress(0.01f, t("查找镜像文件…", "Looking for mirror files…"))
         val artifact = try {
             repos.ubuntuBase(mirror)
         } catch (error: Exception) {
-            log("镜像 ${mirror.name} 不可用（${error.message}），自动换一个…")
+            log(t("镜像 ${mirror.displayName} 不可用（${error.message}），自动换一个…", "Mirror ${mirror.displayName} is unavailable (${error.message}); trying another…"))
             val fallback = Mirrors.ubuntu.firstOrNull { it.id != mirror.id } ?: throw error
-            repos.ubuntuBase(fallback).also { log("改用 ${fallback.name}") }
+            repos.ubuntuBase(fallback).also { log(t("改用 ${fallback.displayName}", "Trying ${fallback.displayName}")) }
         }
-        val sizeText = if (artifact.size > 0) "${artifact.size / 1024 / 1024} MB" else "大小未知"
-        log("rootfs：${artifact.fileName}（$sizeText）来自 ${mirror.name}")
+        val sizeText = if (artifact.size > 0) "${artifact.size / 1024 / 1024} MB" else t("大小未知", "Size unknown")
+        log(t("rootfs：${artifact.fileName}（$sizeText）来自 ${mirror.displayName}", "rootfs: ${artifact.fileName} ($sizeText) from ${mirror.displayName}"))
 
         // 备选地址直接用同一个文件名拼，不再逐个镜像去拉目录列表（那会让下载晚十几秒）
         val urls = buildList {
@@ -297,19 +324,19 @@ class Installer(
 
         val target = File(paths.downloadDir, artifact.fileName)
         val expected = Downloader.ExpectedHash.sha256(artifact.sha256)
-        if (expected == null) log("提示：该镜像没有提供 SHA256SUMS，本次跳过摘要校验")
+        if (expected == null) log(t("提示：该镜像没有提供 SHA256SUMS，本次跳过摘要校验", "Note: this mirror has no SHA256SUMS; skipping checksum verification"))
         val file = downloads.fetchFrom(urls, target, expected, isCanceled = { cancelRequested }) { progress ->
             val detail = if (progress.known) {
-                "下载中 ${progress.bytes / 1024 / 1024}MB / ${progress.total / 1024 / 1024}MB"
+                t("下载中 ${progress.bytes / 1024 / 1024}MB / ${progress.total / 1024 / 1024}MB", "Downloading ${progress.bytes / 1024 / 1024}MB / ${progress.total / 1024 / 1024}MB")
             } else {
-                "下载中 ${progress.bytes / 1024 / 1024}MB"
+                t("下载中 ${progress.bytes / 1024 / 1024}MB", "Downloading ${progress.bytes / 1024 / 1024}MB")
             }
             setProgress((progress.fraction * 0.7f).coerceIn(0f, 0.7f), detail)
         }
-        if (expected != null) log("rootfs 摘要校验通过")
+        if (expected != null) log(t("rootfs 摘要校验通过", "rootfs checksum verified"))
 
         // 先解压到 ubuntu.new：自检通过后再整体替换，失败则回滚，避免把能用的环境毁掉
-        setProgress(0.72f, "解压中…")
+        setProgress(0.72f, t("解压中…", "Extracting…"))
         val staging = File(paths.home, "ubuntu.new")
         FileOps.deleteTree(staging)
         staging.mkdirs()
@@ -319,12 +346,12 @@ class Installer(
             isActive = { !cancelRequested },
             onProgress = { s ->
                 val fraction = if (artifact.size > 0) (s.bytes.toFloat() / (artifact.size * 4f)) else 0f
-                setProgress(0.72f + fraction.coerceIn(0f, 0.2f), "解压 ${s.files} 个文件…")
+                setProgress(0.72f + fraction.coerceIn(0f, 0.2f), t("解压 ${s.files} 个文件…", "Extracting ${s.files} files…"))
             },
         )
-        log("解压完成：${stats.files} 个文件，${stats.bytes / 1024 / 1024} MB" +
+        log(t("解压完成：${stats.files} 个文件，${stats.bytes / 1024 / 1024} MB", "Extracted ${stats.files} files, ${stats.bytes / 1024 / 1024} MB") +
             if (stats.skippedLinks > 0 || stats.escaped > 0) {
-                "（跳过链接 ${stats.skippedLinks} 个，越界条目 ${stats.escaped} 个）"
+                t("（跳过链接 ${stats.skippedLinks} 个，越界条目 ${stats.escaped} 个）", " (skipped ${stats.skippedLinks} links, ${stats.escaped} out-of-tree entries)")
             } else {
                 ""
             })
@@ -335,7 +362,7 @@ class Installer(
             net.writeResolvConf()
             installSystemCaBundle()
 
-            setProgress(0.95f, "自检…")
+            setProgress(0.95f, t("自检…", "Verifying…"))
             val check = shell.run(
                 "uname -m && . /etc/os-release && echo \$PRETTY_NAME && id -u",
                 config,
@@ -343,14 +370,14 @@ class Installer(
                 isCanceled = { cancelRequested },
             )
             if (!check.success) {
-                throw IllegalStateException("rootfs 自检失败：${check.text.takeLast(400)}")
+                throw IllegalStateException(t("rootfs 自检失败：${check.text.takeLast(400)}", "rootfs verification failed: ${check.text.takeLast(400)}"))
             }
             val arch = check.lines.firstOrNull()?.trim().orEmpty()
-            if (arch != "aarch64") throw IllegalStateException("rootfs 架构异常：$arch")
+            if (arch != "aarch64") throw IllegalStateException(t("rootfs 架构异常：$arch", "Unexpected rootfs architecture: $arch"))
         } catch (error: Exception) {
             // 自检/写配置失败：把旧环境换回来（如果本来就没有旧环境，就清掉这份坏的）
             runCatching { FileOps.rollbackSwap(backup, paths.rootfs) }
-                .onFailure { log("回滚失败，请到设置里删除环境后重装：${it.message}") }
+                .onFailure { log(t("回滚失败，请到设置里删除环境后重装：${it.message}", "Rollback failed. Delete the environment in Settings and reinstall: ${it.message}")) }
             throw error
         }
         FileOps.finishSwap(backup)
@@ -369,22 +396,22 @@ class Installer(
         val ca = File(paths.rootfs, CaBundle.GUEST_PATH)
         if (CaBundle.needsInjection(ca.isFile, if (ca.isFile) ca.length() else 0)) {
             throw IllegalStateException(
-                "容器里没有可用的 CA 证书，无法安全地安装软件包：" +
-                    "请确认设备系统证书可读（注入失败会打日志），或换一个支持 HTTPS 的镜像源后重试。",
+                t("容器里没有可用的 CA 证书，无法安全地安装软件包：", "No usable CA certificates in the container; packages cannot be installed securely:") +
+                    t("请确认设备系统证书可读（注入失败会打日志），或换一个支持 HTTPS 的镜像源后重试。", "Make sure the system certificates are readable (injection failures are logged), or switch to an HTTPS mirror and retry."),
             )
         }
         if (apt.base.startsWith("http://")) {
-            throw IllegalStateException("当前 apt 源是明文 http（${apt.name}），请在安装页换成 https 源后重试。")
+            throw IllegalStateException(t("当前 apt 源是明文 http（${apt.displayName}），请在安装页换成 https 源后重试。", "The apt mirror is plain HTTP (${apt.displayName}); switch to an HTTPS mirror in Setup and retry."))
         }
         val distro = detectUbuntuCodename() ?: "noble"
-        log("apt 源：${apt.name}（${apt.base}，发行版 $distro）")
+        log(t("apt 源：${apt.displayName}（${apt.base}，发行版 $distro）", "apt mirror: ${apt.displayName} (${apt.base}, distro $distro)"))
         val script = assetText("scripts/setup-apt.sh")
             .replace("@APT_MIRROR@", apt.base)
             .replace("@DISTRO@", distro)
         writeGuestFile("/root/.pocket/setup-apt.sh", script, 0b111_101_101)
         writeGuestFile("/root/.pocket/install-tools.sh", assetText("scripts/install-tools.sh"), 0b111_101_101)
 
-        setProgress(0.1f, "刷新软件源…")
+        setProgress(0.1f, t("刷新软件源…", "Refreshing package lists…"))
         val update = shell.run(
             "/root/.pocket/setup-apt.sh",
             config,
@@ -394,14 +421,14 @@ class Installer(
         if (!update.success) {
             val text = update.text
             val hint = if (text.contains("No system certificates", ignoreCase = true) || text.contains("Certificate verification failed", ignoreCase = true)) {
-                "（容器里的 CA 证书不可用：重跑第 2 步「安装 Ubuntu 环境」会重新注入系统证书）"
+                t("（容器里的 CA 证书不可用：重跑第 2 步「安装 Ubuntu 环境」会重新注入系统证书）", " (CA certificates in the container are unusable: rerun step 2, Install Ubuntu, to inject them again)")
             } else {
                 ""
             }
-            throw IllegalStateException("apt update 失败$hint：${text.takeLast(400)}")
+            throw IllegalStateException(t("apt update 失败$hint：${text.takeLast(400)}", "apt update failed$hint: ${text.takeLast(400)}"))
         }
 
-        setProgress(0.5f, "安装基础工具…")
+        setProgress(0.5f, t("安装基础工具…", "Installing base tools…"))
         val install = shell.run(
             "/root/.pocket/install-tools.sh",
             config,
@@ -412,28 +439,28 @@ class Installer(
             val text = install.text
             val hint = when {
                 text.contains("dpkg was interrupted", ignoreCase = true) ->
-                    "（dpkg 中断过，重跑本步骤会自动修复）"
-                text.contains("CA 证书") || text.contains("No system certificates", ignoreCase = true) ->
-                    "（容器里缺少 CA 证书：先重跑第 2 步「安装 Ubuntu 环境」注入系统证书，再回来重试）"
+                    t("（dpkg 中断过，重跑本步骤会自动修复）", " (a previous dpkg run was interrupted; rerunning this step fixes it)")
+                text.contains("CA 证书") || text.contains("CA certificates", ignoreCase = true) || text.contains("No system certificates", ignoreCase = true) ->
+                    t("（容器里缺少 CA 证书：先重跑第 2 步「安装 Ubuntu 环境」注入系统证书，再回来重试）", " (CA certificates are missing: rerun step 2, Install Ubuntu, then retry)")
                 else -> ""
             }
-            throw IllegalStateException("工具安装失败$hint：${text.takeLast(400)}")
+            throw IllegalStateException(t("工具安装失败$hint：${text.takeLast(400)}", "Tool installation failed$hint: ${text.takeLast(400)}"))
         }
         saveVersion("tools", "ready")
-        return "git / curl / ripgrep 已就绪"
+        return t("git / curl / ripgrep 已就绪", "git / curl / ripgrep are ready")
     }
 
     private suspend fun stepNode(config: AppSettings): String {
         val mirror = Mirrors.find(Mirrors.node, config.nodeMirror)
-        setProgress(0.02f, "解析 Node 版本…")
+        setProgress(0.02f, t("解析 Node 版本…", "Resolving Node version…"))
         val artifact = try {
             repos.nodeLts(mirror)
         } catch (error: Exception) {
-            log("镜像 ${mirror.name} 不可用（${error.message}），自动换一个…")
+            log(t("镜像 ${mirror.displayName} 不可用（${error.message}），自动换一个…", "Mirror ${mirror.displayName} is unavailable (${error.message}); trying another…"))
             val fallback = Mirrors.node.firstOrNull { it.id != mirror.id } ?: throw error
-            repos.nodeLts(fallback).also { log("改用 ${fallback.name}") }
+            repos.nodeLts(fallback).also { log(t("改用 ${fallback.displayName}", "Trying ${fallback.displayName}")) }
         }
-        log("Node：${artifact.version}（${artifact.fileName}）来自 ${mirror.name}")
+        log(t("Node：${artifact.version}（${artifact.fileName}）来自 ${mirror.displayName}", "Node: ${artifact.version} (${artifact.fileName}) from ${mirror.displayName}"))
 
         val urls = buildList {
             add(artifact.url)
@@ -444,16 +471,16 @@ class Installer(
 
         val target = File(paths.downloadDir, artifact.fileName)
         val expected = Downloader.ExpectedHash.sha256(artifact.sha256)
-        if (expected == null) log("提示：该镜像没有 SHASUMS256.txt，本次跳过摘要校验")
+        if (expected == null) log(t("提示：该镜像没有 SHASUMS256.txt，本次跳过摘要校验", "Note: this mirror has no SHASUMS256.txt; skipping checksum verification"))
         val file = downloads.fetchFrom(urls, target, expected, isCanceled = { cancelRequested }) { progress ->
             setProgress(
                 (progress.fraction * 0.8f).coerceIn(0f, 0.8f),
-                "下载 Node ${progress.bytes / 1024 / 1024}MB / ${(progress.total / 1024 / 1024).coerceAtLeast(0)}MB",
+                t("下载 Node ${progress.bytes / 1024 / 1024}MB / ${(progress.total / 1024 / 1024).coerceAtLeast(0)}MB", "Downloading Node ${progress.bytes / 1024 / 1024}MB / ${(progress.total / 1024 / 1024).coerceAtLeast(0)}MB"),
             )
         }
-        if (expected != null) log("Node 摘要校验通过")
+        if (expected != null) log(t("Node 摘要校验通过", "Node checksum verified"))
 
-        setProgress(0.82f, "解压 Node…")
+        setProgress(0.82f, t("解压 Node…", "Extracting Node…"))
         // 换镜像/LTS 版本时把旧 Node 清干净，否则 include/lib 里头和库会混版本
         listOf(
             "usr/local/lib/node_modules",
@@ -469,7 +496,7 @@ class Installer(
             strip = 1,
             isActive = { !cancelRequested },
             onProgress = { s ->
-                setProgress(0.82f + (s.files % 100) / 500f, "解压 ${s.files} 个文件…")
+                setProgress(0.82f + (s.files % 100) / 500f, t("解压 ${s.files} 个文件…", "Extracting ${s.files} files…"))
             },
         )
         runCatching { Os.chmod(File(dest, "bin/node").absolutePath, 0b111_101_101) }
@@ -484,16 +511,16 @@ class Installer(
         }
         file.delete()
 
-        setProgress(0.95f, "自检…")
+        setProgress(0.95f, t("自检…", "Verifying…"))
         val check = shell.run("node -v", config, timeoutMs = 120_000, isCanceled = { cancelRequested })
-        if (!check.success) throw IllegalStateException("Node 自检失败：${check.text.takeLast(300)}")
+        if (!check.success) throw IllegalStateException(t("Node 自检失败：${check.text.takeLast(300)}", "Node verification failed: ${check.text.takeLast(300)}"))
 
         // npm 是 Node 包自带的，opencode 本体并不依赖它。个别 Node 大版本在 proot 下的
         // 模块解析会失败（CI 里 Node 24 的 npm 报 Cannot find module …/walk-up-path/…），
         // 这不该让整个安装中断：只记一条日志，用户真要用 npm 时可以在终端里看到原因。
         val npm = shell.run("npm -v", config, timeoutMs = 120_000, isCanceled = { cancelRequested })
         if (!npm.success) {
-            log("注意：npm 自检失败（不影响 opencode 本体）：${npm.text.lineSequence().firstOrNull()?.trim().orEmpty()}")
+            log(t("注意：npm 自检失败（不影响 opencode 本体）：${npm.text.lineSequence().firstOrNull()?.trim().orEmpty()}", "Note: npm self-check failed (opencode itself is unaffected): ${npm.text.lineSequence().firstOrNull()?.trim().orEmpty()}"))
         }
 
         saveVersion("node", artifact.version)
@@ -502,7 +529,7 @@ class Installer(
 
     private suspend fun stepOpencode(config: AppSettings): String {
         val registry = Mirrors.find(Mirrors.npm, config.npmMirror)
-        setProgress(0.02f, "查询最新版本…")
+        setProgress(0.02f, t("查询最新版本…", "Looking up the latest version…"))
         val primary = registry.base
         val primaryVersion = runCatching { repos.opencodeVersion(primary) }.getOrNull()
         val registryBase: String
@@ -511,12 +538,12 @@ class Installer(
             registryBase = primary
             version = primaryVersion
         } else {
-            val fallback = Mirrors.npm.firstOrNull { it.id != registry.id } ?: throw IllegalStateException("所有 npm 镜像都不可用")
-            log("registry ${registry.name} 不可用，改用 ${fallback.name}")
+            val fallback = Mirrors.npm.firstOrNull { it.id != registry.id } ?: throw IllegalStateException(t("所有 npm 镜像都不可用", "All npm mirrors are unavailable"))
+            log(t("registry ${registry.displayName} 不可用，改用 ${fallback.displayName}", "Registry ${registry.displayName} is unavailable; trying ${fallback.displayName}"))
             registryBase = fallback.base
             version = repos.opencodeVersion(registryBase)
         }
-        log("OpenCode 最新版：$version（registry: $registryBase）")
+        log(t("OpenCode 最新版：$version（registry: $registryBase）", "Latest OpenCode: $version (registry: $registryBase)"))
 
         val tarball = repos.opencodeTarball(registryBase, version)
         val urls = buildList {
@@ -528,17 +555,17 @@ class Installer(
         val target = File(paths.downloadDir, tarball.fileName)
         // npm 的 dist.shasum 是 sha1；拿不到就不校验（HTTPS 仍在）
         val expected = Downloader.ExpectedHash.sha1(repos.opencodeSha1(registryBase, version))
-        if (expected == null) log("提示：registry 没有提供 shasum，本次跳过摘要校验")
+        if (expected == null) log(t("提示：registry 没有提供 shasum，本次跳过摘要校验", "Note: the registry has no shasum; skipping checksum verification"))
 
         val file = downloads.fetchFrom(urls, target, expected, isCanceled = { cancelRequested }) { progress ->
             setProgress(
                 (progress.fraction * 0.85f).coerceIn(0f, 0.85f),
-                "下载 ${progress.bytes / 1024 / 1024}MB / ${(progress.total / 1024 / 1024).coerceAtLeast(0)}MB",
+                t("下载 ${progress.bytes / 1024 / 1024}MB / ${(progress.total / 1024 / 1024).coerceAtLeast(0)}MB", "Downloading ${progress.bytes / 1024 / 1024}MB / ${(progress.total / 1024 / 1024).coerceAtLeast(0)}MB"),
             )
         }
-        if (expected != null) log("opencode 摘要校验通过")
+        if (expected != null) log(t("opencode 摘要校验通过", "opencode checksum verified"))
 
-        setProgress(0.88f, "安装可执行文件…")
+        setProgress(0.88f, t("安装可执行文件…", "Installing executable…"))
         val binDir = File(paths.rootfs, "usr/local/lib/opencode")
         FileOps.deleteTree(binDir)
         binDir.mkdirs()
@@ -550,7 +577,7 @@ class Installer(
             include = { relative -> relative == "bin/opencode" },
         )
         val binary = File(binDir, "bin/opencode")
-        if (!binary.isFile) throw IllegalStateException("压缩包里没有找到 bin/opencode")
+        if (!binary.isFile) throw IllegalStateException(t("压缩包里没有找到 bin/opencode", "bin/opencode was not found in the archive"))
         runCatching { Os.chmod(binary.absolutePath, 0b111_101_101) }
         val link = File(paths.rootfs, "usr/local/bin/opencode")
         link.parentFile?.mkdirs()
@@ -558,11 +585,11 @@ class Installer(
         runCatching { Os.symlink("../lib/opencode/bin/opencode", link.absolutePath) }
         file.delete()
 
-        setProgress(0.94f, "自检（首次运行会慢一些）…")
+        setProgress(0.94f, t("自检（首次运行会慢一些）…", "Verifying (the first run is slower)…"))
         val check = shell.run("opencode --version", config, timeoutMs = 240_000, isCanceled = { cancelRequested }) { line ->
             log("opencode: $line")
         }
-        if (!check.success) throw IllegalStateException("opencode 无法运行：${check.text.takeLast(500)}")
+        if (!check.success) throw IllegalStateException(t("opencode 无法运行：${check.text.takeLast(500)}", "opencode cannot run: ${check.text.takeLast(500)}"))
         val detected = check.lines.firstOrNull { it.trim().isNotEmpty() }?.trim() ?: version
         saveVersion("opencode", detected)
         return "OpenCode $detected"
@@ -580,14 +607,14 @@ class Installer(
             timeoutMs = 120_000,
             isCanceled = { cancelRequested },
         )
-        if (!result.success) throw IllegalStateException("容器配置失败：${result.text.takeLast(300)}")
+        if (!result.success) throw IllegalStateException(t("容器配置失败：${result.text.takeLast(300)}", "Container configuration failed: ${result.text.takeLast(300)}"))
 
         // opencode 配置（模型、密钥、权限、服务器）
         val json = OpencodeConfig.build(config)
         writeGuestFile(PocketPaths.Guest.OPENCODE_CONFIG, json, 0b110_000_000)
-        log("已写入 opencode 配置（${json.length} 字节）")
+        log(t("已写入 opencode 配置（${json.length} 字节）", "Wrote opencode config (${json.length} bytes)"))
         saveVersion("config", "ready")
-        return "配置已写入"
+        return t("配置已写入", "Configuration written")
     }
 
     // ------------------------------------------------------------------ 工具方法
@@ -647,13 +674,13 @@ class Installer(
         _state.update { snapshot ->
             snapshot.copy(
                 running = step,
-                message = step.title,
+                message = step.titleText,
                 steps = snapshot.steps.map {
                     if (it.step == step) it.copy(state = StepState.RUNNING, progress = 0f, error = null) else it
                 },
             )
         }
-        log("▶ ${step.title}：${step.subtitle}")
+        log(t("▶ ${step.title}：${step.subtitle}", "▶ ${step.titleEn}: ${step.subtitleEn}"))
     }
 
     private fun updateStep(
@@ -788,12 +815,12 @@ class Installer(
             target.delete()
         }
         when {
-            failure != null -> log("注入系统 CA 失败（$failure）：https 的 apt 源会不可用，可重跑本步骤")
+            failure != null -> log(t("注入系统 CA 失败（$failure）：https 的 apt 源会不可用，可重跑本步骤", "System CA injection failed ($failure): HTTPS apt mirrors will not work; rerun this step"))
             count == 0 -> {
                 target.delete()
-                log("系统 CA 目录里没有可用的证书：https 的 apt 源会不可用，可重跑本步骤")
+                log(t("系统 CA 目录里没有可用的证书：https 的 apt 源会不可用，可重跑本步骤", "No usable certificates in the system CA folder: HTTPS apt mirrors will not work; rerun this step"))
             }
-            else -> log("已注入系统 CA 证书 $count 张（${target.length() / 1024} KB）")
+            else -> log(t("已注入系统 CA 证书 $count 张（${target.length() / 1024} KB）", "Injected $count system CA certificates (${target.length() / 1024} KB)"))
         }
     }
 

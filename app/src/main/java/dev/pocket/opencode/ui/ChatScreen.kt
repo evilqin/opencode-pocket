@@ -1,5 +1,7 @@
 package dev.pocket.opencode.ui
 
+import dev.pocket.opencode.i18n.t
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -53,17 +55,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -90,7 +91,7 @@ import dev.pocket.opencode.ui.components.SectionHeader
 import dev.pocket.opencode.ui.components.StatusPill
 import dev.pocket.opencode.ui.components.copyToClipboard
 import dev.pocket.opencode.ui.theme.CodeTextStyle
-import dev.pocket.opencode.ui.theme.PocketColors
+import dev.pocket.opencode.ui.theme.LocalPocketAccents
 import dev.pocket.opencode.util.Format
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -120,9 +121,9 @@ fun ChatScreen(engine: PocketEngine, onOpenSettings: () -> Unit) {
     when {
         server.phase != ServerPhase.RUNNING -> EmptyState(
             icon = PocketIcons.Forum,
-            title = "服务未在运行",
-            body = server.error ?: "对话页直连手机上的 opencode 服务；先在首页把服务启动起来。",
-            action = { Button(onClick = { engine.startServer() }) { Text("启动服务") } },
+            title = t("服务未在运行", "Server is not running"),
+            body = server.error ?: t("对话页直连手机上的 opencode 服务；先在首页把服务启动起来。", "This tab talks directly to the opencode server on your phone. Start it from Home first."),
+            action = { Button(onClick = { engine.startServer() }) { Text(t("启动服务", "Start server")) } },
         )
 
         selectedId != null && restored == null -> Box(
@@ -161,12 +162,13 @@ private fun SessionList(
     onOpenSettings: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val accents = LocalPocketAccents.current
     val settings by engine.settings.settings.collectAsStateWithLifecycle()
     val sessions = remember { mutableStateListOf<SessionInfo>() }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var pendingDelete by remember { mutableStateOf<SessionInfo?>(null) }
-    var refreshToken by remember { mutableStateOf(0) }
+    var refreshToken by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(refreshToken) {
         loading = true
@@ -193,12 +195,12 @@ private fun SessionList(
                 item {
                     PocketCard(onClick = onOpenSettings) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Warning, null, Modifier.size(20.dp), tint = PocketColors.Amber)
+                            Icon(Icons.Filled.Warning, null, Modifier.size(20.dp), tint = accents.amber)
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text("还没配置模型密钥", style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "去设置里填一个 provider 的 API Key（DeepSeek / Anthropic / OpenAI…）",
+                                    t("去设置里填一个 provider 的 API Key（DeepSeek / Anthropic / OpenAI…）", "Add a provider API key in Settings (DeepSeek / Anthropic / OpenAI…)"),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -211,9 +213,9 @@ private fun SessionList(
 
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    SectionHeader("会话", "${sessions.size} 个", Modifier.weight(1f))
+                    SectionHeader(t("会话", "Sessions"), t("${sessions.size} 个", "${sessions.size}"), Modifier.weight(1f))
                     IconButton(onClick = { refreshToken++ }) {
-                        Icon(Icons.Filled.Refresh, "刷新")
+                        Icon(Icons.Filled.Refresh, t("刷新", "Refresh"))
                     }
                 }
             }
@@ -234,7 +236,7 @@ private fun SessionList(
                             color = MaterialTheme.colorScheme.error,
                         )
                         Spacer(Modifier.height(10.dp))
-                        OutlinedButton(onClick = { refreshToken++ }) { Text("重试") }
+                        OutlinedButton(onClick = { refreshToken++ }) { Text(t("重试", "Retry")) }
                     }
                 }
 
@@ -246,7 +248,7 @@ private fun SessionList(
                         Text("还没有会话", style = MaterialTheme.typography.titleSmall)
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            "点右下角的按钮新建一个，或直接说出你想做的事",
+                            t("点右下角的按钮新建一个，或直接说出你想做的事", "Tap the button in the corner to start one, or just describe what you want"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -282,15 +284,15 @@ private fun SessionList(
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
         ) {
-            Icon(Icons.Filled.Add, "新建会话")
+            Icon(Icons.Filled.Add, t("新建会话", "New session"))
         }
     }
 
     pendingDelete?.let { session ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("删除会话？") },
-            text = { Text("「${session.title}」及其消息记录会被删除，不可恢复。") },
+            title = { Text(t("删除会话？", "Delete session?")) },
+            text = { Text(t("「${session.title}」及其消息记录会被删除，不可恢复。", "\"${session.title}\" and its messages will be deleted permanently.")) },
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
@@ -298,9 +300,9 @@ private fun SessionList(
                         sessions.removeAll { it.id == session.id }
                         pendingDelete = null
                     }
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }) { Text(t("删除", "Delete"), color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text(t("取消", "Cancel")) } },
         )
     }
 }
@@ -338,7 +340,7 @@ private fun SessionRow(session: SessionInfo, onClick: () -> Unit, onLongClick: (
                 Text(
                     buildString {
                         append(Format.relativeTime(session.updated))
-                        if (session.files > 0) append(" · ${session.files} 个文件")
+                        if (session.files > 0) append(t(" · ${session.files} 个文件", " · ${session.files} files"))
                         if (session.additions > 0 || session.deletions > 0) {
                             append(" · +${session.additions} -${session.deletions}")
                         }
@@ -350,7 +352,7 @@ private fun SessionRow(session: SessionInfo, onClick: () -> Unit, onLongClick: (
             IconButton(onClick = onLongClick) {
                 Icon(
                     Icons.Filled.Delete,
-                    "删除",
+                    t("删除", "Delete"),
                     Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -382,13 +384,28 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
     /** 事件流重连过，需要补拉一次历史。 */
     var pendingResync by mutableStateOf(false)
 
+    /** 正在拉历史时先缓冲实时事件，避免「load() 清空消息」把刚到的流式片段吞掉。 */
+    private val pendingEvents = mutableListOf<JSONObject>()
+    private var syncing = false
+
     /** 只重拉消息（不动 loading 状态，供 resync 使用）。 */
     suspend fun reloadMessages() {
-        runCatching { engine.api.messages(session.id) }.onSuccess { history ->
-            val merged = history.sortedWith(compareBy({ it.info.created }, { it.info.id }))
-            messages.clear()
-            messages.addAll(merged)
+        if (syncing) return
+        syncing = true
+        try {
+            runCatching { engine.api.messages(session.id) }.onSuccess { history ->
+                mergeHistory(history)
+            }
+        } finally {
+            syncing = false
+            flushPendingEvents()
         }
+    }
+
+    private fun mergeHistory(history: List<ChatMessage>) {
+        val merged = history.sortedWith(compareBy({ it.info.created }, { it.info.id }))
+        messages.clear()
+        messages.addAll(merged)
     }
 
     /**
@@ -409,10 +426,10 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
     suspend fun load() {
         loading = true
         error = null
+        syncing = true
         try {
             val history = engine.api.messages(session.id)
-            messages.clear()
-            messages.addAll(history.sortedWith(compareBy({ it.info.created }, { it.info.id })))
+            mergeHistory(history)
             runCatching {
                 val (list, defaults) = engine.api.providers()
                 providers = list.filter { it.models.isNotEmpty() }
@@ -426,11 +443,29 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
             runCatching { agents = engine.api.agents().filter { it.isPrimary } }
         } catch (exception: Exception) {
             error = exception.message
+        } finally {
+            loading = false
+            syncing = false
+            flushPendingEvents()
         }
-        loading = false
+    }
+
+    private fun flushPendingEvents() {
+        if (pendingEvents.isEmpty()) return
+        val buffered = pendingEvents.toList()
+        pendingEvents.clear()
+        buffered.forEach(::applyEvent)
     }
 
     fun handleEvent(event: JSONObject) {
+        if (syncing) {
+            pendingEvents.add(event)
+            return
+        }
+        applyEvent(event)
+    }
+
+    private fun applyEvent(event: JSONObject) {
         val type = event.optString("type")
         if (type == "resync") {
             // 事件流重连过：补拉一次历史，避免漏事件
@@ -498,6 +533,7 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
                 if (props.optString("sessionID") == session.id) {
                     error = Parsers.formatError(props.optJSONObject("error"))
                         ?: props.optJSONObject("error")?.optString("name")
+                    busy = false
                 }
             }
 
@@ -575,7 +611,10 @@ private class ChatState(val engine: PocketEngine, val session: SessionInfo) {
             if (removed.isNotEmpty() && permissions.none { it.id == request.id }) {
                 permissions.addAll(removed)
             }
-            error = "授权回复失败：${result.exceptionOrNull()?.message ?: "请重试"}"
+            error = t(
+                "授权回复失败：${result.exceptionOrNull()?.message ?: "请重试"}",
+                "Permission reply failed: ${result.exceptionOrNull()?.message ?: "Please try again"}",
+            )
         }
     }
 
@@ -641,7 +680,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                     .padding(horizontal = 4.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, t("返回", "Back")) }
                 Column(
                     Modifier
                         .weight(1f)
@@ -654,7 +693,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        if (chat.busy) "正在思考…" else "opencode · ${Format.clockTime(session.created)}",
+                        if (chat.busy) t("正在思考…", "Thinking…") else "opencode · ${Format.clockTime(session.created)}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -662,8 +701,8 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                 IconButton(onClick = {
                     chat.showDiffs = true
                     scope.launch { chat.loadDiff() }
-                }) { Icon(PocketIcons.Code, "本次改动") }
-                IconButton(onClick = { scope.launch { chat.load() } }) { Icon(Icons.Filled.Refresh, "重新加载") }
+                }) { Icon(PocketIcons.Code, t("本次改动", "Changes")) }
+                IconButton(onClick = { scope.launch { chat.load() } }) { Icon(Icons.Filled.Refresh, t("重新加载", "Reload")) }
             }
         }
 
@@ -698,7 +737,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                                 )
                                 Spacer(Modifier.width(10.dp))
                                 Text(
-                                    "正在生成回复…",
+                                    t("正在生成回复…", "Generating reply…"),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -725,7 +764,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = { chat.error = null }) { Text("知道了") }
+                    TextButton(onClick = { chat.error = null }) { Text(t("知道了", "Got it")) }
                 }
             }
         }
@@ -739,7 +778,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                 ) {
                     val modelLabel = chat.selectedModel?.let { (provider, model) ->
                         model.substringAfterLast('/').ifBlank { model } + " · " + provider
-                    } ?: "默认模型"
+                    } ?: t("默认模型", "Default model")
                     AssistChip(
                         onClick = { showModelPicker = true },
                         label = { Text(modelLabel, style = MaterialTheme.typography.labelSmall) },
@@ -768,8 +807,8 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                         }
                     }
                     AssistChip(
-                        onClick = { copyToClipboard(context, chat.messages.joinToString("\n\n") { m -> m.info.role + ": " + m.parts.filterIsInstance<Part.Text>().joinToString(" ") { it.text } }, "对话已复制") },
-                        label = { Text("复制对话", style = MaterialTheme.typography.labelSmall) },
+                        onClick = { copyToClipboard(context, chat.messages.joinToString("\n\n") { m -> m.info.role + ": " + m.parts.filterIsInstance<Part.Text>().joinToString(" ") { it.text } }, t("对话已复制", "Conversation copied")) },
+                        label = { Text(t("复制对话", "Copy chat"), style = MaterialTheme.typography.labelSmall) },
                     )
                 }
                 Spacer(Modifier.height(8.dp))
@@ -798,7 +837,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                         FilledTonalButton(onClick = { scope.launch { chat.abort() } }) {
                             Icon(PocketIcons.Stop, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("停止")
+                            Text(t("停止", "Stop"))
                         }
                     } else {
                         Button(
@@ -811,7 +850,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                             },
                             enabled = input.isNotBlank(),
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.Send, "发送", Modifier.size(17.dp))
+                            Icon(Icons.AutoMirrored.Filled.Send, t("发送", "Send"), Modifier.size(17.dp))
                         }
                     }
                 }
@@ -822,14 +861,14 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
     if (showModelPicker) {
         AlertDialog(
             onDismissRequest = { showModelPicker = false },
-            title = { Text("选择模型") },
+            title = { Text(t("选择模型", "Choose model")) },
             text = {
                 LazyColumn(Modifier.height(400.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     item {
                         TextButton(onClick = {
                             chat.selectedModel = null
                             showModelPicker = false
-                        }) { Text("跟随 opencode 默认") }
+                        }) { Text(t("跟随 opencode 默认", "Use opencode default")) }
                     }
                     chat.providers.forEach { provider ->
                         item {
@@ -858,7 +897,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showModelPicker = false }) { Text("关闭") } },
+            confirmButton = { TextButton(onClick = { showModelPicker = false }) { Text(t("关闭", "Close")) } },
         )
     }
 
@@ -866,7 +905,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
         var text by remember { mutableStateOf(chat.title) }
         AlertDialog(
             onDismissRequest = { showRename = false },
-            title = { Text("重命名会话") },
+            title = { Text(t("重命名会话", "Rename session")) },
             text = {
                 OutlinedTextField(
                     value = text,
@@ -878,9 +917,9 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
                 TextButton(onClick = {
                     showRename = false
                     scope.launch { chat.rename(text) }
-                }) { Text("保存") }
+                }) { Text(t("保存", "Save")) }
             },
-            dismissButton = { TextButton(onClick = { showRename = false }) { Text("取消") } },
+            dismissButton = { TextButton(onClick = { showRename = false }) { Text(t("取消", "Cancel")) } },
         )
     }
 
@@ -904,6 +943,7 @@ private fun SessionDetail(engine: PocketEngine, session: SessionInfo, onBack: ()
 
 @Composable
 private fun MessageBubble(message: ChatMessage) {
+    val accents = LocalPocketAccents.current
     val context = LocalContext.current
     if (message.info.isUser) {
         val userText = message.parts.filterIsInstance<Part.Text>().joinToString("\n") { it.text }
@@ -915,7 +955,7 @@ private fun MessageBubble(message: ChatMessage) {
                     .fillMaxWidth(0.88f)
                     .combinedClickable(
                         onClick = {},
-                        onLongClick = { copyToClipboard(context, userText, "已复制") },
+                        onLongClick = { copyToClipboard(context, userText, t("已复制", "Copied")) },
                     ),
             ) {
                 Text(
@@ -948,7 +988,7 @@ private fun MessageBubble(message: ChatMessage) {
             )
             Spacer(Modifier.weight(1f))
             message.info.error?.let {
-                StatusPill("出错", PocketColors.Rose)
+                StatusPill(t("出错", "Error"), accents.rose)
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -968,7 +1008,7 @@ private fun MessageBubble(message: ChatMessage) {
                             part.text,
                             modifier = Modifier.combinedClickable(
                                 onClick = {},
-                                onLongClick = { copyToClipboard(context, part.text, "已复制") },
+                                onLongClick = { copyToClipboard(context, part.text, t("已复制", "Copied")) },
                             ),
                         )
                     }
@@ -993,10 +1033,10 @@ private fun MessageBubble(message: ChatMessage) {
                         }
                     }
 
-                    is Part.AgentRef -> StatusPill("子代理 ${part.name}", PocketColors.Violet)
+                    is Part.AgentRef -> StatusPill(t("子代理 ${part.name}", "Subagent ${part.name}"), accents.violet)
 
                     is Part.FileRef -> Text(
-                        "附件：${part.filename}",
+                        t("附件：${part.filename}", "Attachment: ${part.filename}"),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1010,6 +1050,7 @@ private fun MessageBubble(message: ChatMessage) {
 
 @Composable
 private fun ReasoningCard(text: String) {
+    val accents = LocalPocketAccents.current
     var expanded by remember { mutableStateOf(false) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -1024,17 +1065,17 @@ private fun ReasoningCard(text: String) {
                     PocketIcons.Chip,
                     null,
                     Modifier.size(15.dp),
-                    tint = PocketColors.Violet,
+                    tint = accents.violet,
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "思考过程",
+                    t("思考过程", "Reasoning"),
                     style = MaterialTheme.typography.labelMedium,
-                    color = PocketColors.Violet,
+                    color = accents.violet,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    if (expanded) "收起" else "展开",
+                    if (expanded) t("收起", "Collapse") else t("展开", "Expand"),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1053,12 +1094,13 @@ private fun ReasoningCard(text: String) {
 
 @Composable
 private fun ToolCallCard(part: Part.ToolCall, context: android.content.Context) {
+    val accents = LocalPocketAccents.current
     var expanded by remember { mutableStateOf(false) }
     val (tone, label) = when (part.status) {
-        "completed" -> PocketColors.Emerald to "完成"
-        "running" -> PocketColors.Amber to "执行中"
-        "error" -> PocketColors.Rose to "失败"
-        else -> MaterialTheme.colorScheme.onSurfaceVariant to "准备"
+        "completed" -> accents.emerald to t("完成", "Done")
+        "running" -> accents.amber to t("执行中", "Running")
+        "error" -> accents.rose to t("失败", "Failed")
+        else -> MaterialTheme.colorScheme.onSurfaceVariant to t("准备", "Preparing")
     }
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -1102,14 +1144,14 @@ private fun ToolCallCard(part: Part.ToolCall, context: android.content.Context) 
             AnimatedVisibility(visible = expanded) {
                 Column(Modifier.padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (part.input.isNotBlank() && part.input != "{}") {
-                        CodeBlock("输入", part.input)
+                        CodeBlock(t("输入", "Input"), part.input)
                     }
                     if (part.output.isNotBlank()) {
-                        CodeBlock("输出", part.output.take(6000))
+                        CodeBlock(t("输出", "Output"), part.output.take(6000))
                     }
                     TextButton(onClick = {
-                        copyToClipboard(context, part.output.ifBlank { part.input }, "已复制")
-                    }) { Text("复制内容") }
+                        copyToClipboard(context, part.output.ifBlank { part.input }, t("已复制", "Copied"))
+                    }) { Text(t("复制内容", "Copy content")) }
                 }
             }
 
@@ -1129,18 +1171,19 @@ private fun ToolCallCard(part: Part.ToolCall, context: android.content.Context) 
 
 @Composable
 private fun PermissionCard(request: PermissionRequest, onReply: (String) -> Unit) {
+    val accents = LocalPocketAccents.current
     Surface(
-        color = PocketColors.Amber.copy(alpha = 0.12f),
+        color = accents.amber.copy(alpha = 0.12f),
         shape = RoundedCornerShape(18.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, PocketColors.Amber.copy(alpha = 0.35f)),
+        border = androidx.compose.foundation.BorderStroke(1.dp, accents.amber.copy(alpha = 0.35f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(PocketIcons.Shield, null, Modifier.size(18.dp), tint = PocketColors.Amber)
+                Icon(PocketIcons.Shield, null, Modifier.size(18.dp), tint = accents.amber)
                 Spacer(Modifier.width(10.dp))
                 Text("需要你确认", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                StatusPill(request.type.ifBlank { "permission" }, PocketColors.Amber)
+                StatusPill(request.type.ifBlank { "permission" }, accents.amber)
             }
             Spacer(Modifier.height(8.dp))
             Text(request.title, style = MaterialTheme.typography.bodyMedium)
@@ -1150,9 +1193,9 @@ private fun PermissionCard(request: PermissionRequest, onReply: (String) -> Unit
             }
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onReply("once") }) { Text("允许一次") }
-                FilledTonalButton(onClick = { onReply("always") }) { Text("始终允许") }
-                OutlinedButton(onClick = { onReply("reject") }) { Text("拒绝") }
+                Button(onClick = { onReply("once") }) { Text(t("允许一次", "Allow once")) }
+                FilledTonalButton(onClick = { onReply("always") }) { Text(t("始终允许", "Always allow")) }
+                OutlinedButton(onClick = { onReply("reject") }) { Text(t("拒绝", "Deny")) }
             }
         }
     }

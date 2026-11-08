@@ -8,12 +8,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import dev.pocket.opencode.core.DeepLinks
 import dev.pocket.opencode.core.PocketEngine
+import dev.pocket.opencode.i18n.I18n
 import dev.pocket.opencode.ui.PocketRoot
 import dev.pocket.opencode.ui.theme.PocketTheme
 import kotlinx.coroutines.launch
@@ -32,10 +34,15 @@ class MainActivity : ComponentActivity() {
         val engine = (application as PocketApp).engine
         splash.setKeepOnScreenCondition { false }
 
+        // 首帧之前就应用语言，避免英文设备上先闪一下中文
+        I18n.mode = engine.settings.settings.value.language
+
         handleShortcutIntent(intent, engine)
 
         setContent {
             val settings by engine.settings.settings.collectAsStateWithLifecycle()
+            // 应用内切换语言：snapshot state 更新后，所有调用 t() 的界面会自动重组
+            LaunchedEffect(settings.language) { I18n.mode = settings.language }
             PocketTheme(
                 themeMode = settings.themeMode,
                 dynamicColor = settings.dynamicColor,

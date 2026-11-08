@@ -80,9 +80,11 @@ data class AppSettings(
     val defaultModel: String = "",
     val smallModel: String = "",
 
-    /** 外观。 */
-    val themeMode: String = "dark",
+    /** 外观与语言。 */
+    val themeMode: String = "system",
     val dynamicColor: Boolean = false,
+    /** 界面语言：system / zh / en（见 I18n）。 */
+    val language: String = "system",
 
     /** 是否已经弹过一次通知权限（避免每次冷启动都打扰用户）。 */
     val notificationAsked: Boolean = false,

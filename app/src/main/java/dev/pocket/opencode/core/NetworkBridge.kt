@@ -5,7 +5,6 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import java.io.File
-import java.net.InetAddress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
@@ -22,6 +21,7 @@ class NetworkBridge(private val context: Context, private val paths: PocketPaths
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
     /** 当前网络的首选 DNS 服务器（IPv4 优先，去掉 link-local 的 %scope 后缀）。 */
+    @Suppress("DEPRECATION") // allNetworks 在 API 31 被标记弃用，但 minSdk 30 仍需要它兜底
     fun currentDnsServers(): List<String> {
         val result = LinkedHashSet<String>()
         try {
@@ -60,7 +60,7 @@ class NetworkBridge(private val context: Context, private val paths: PocketPaths
     /** 把 DNS 写进 rootfs。调用前 rootfs 必须已存在。 */
     suspend fun writeResolvConf() = withContext(Dispatchers.IO) {
         val target = File(paths.rootfs, "etc/resolv.conf")
-        if (!target.parentFile.isDirectory) return@withContext
+        if (target.parentFile?.isDirectory != true) return@withContext
         // 上游 rootfs 里 /etc/resolv.conf 可能是软链（如指向 systemd-resolved），写了会跑出树外
         FileOps.ensureNoSymlinkPath(paths.rootfs, target)
         val lines = buildString {

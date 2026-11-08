@@ -41,6 +41,7 @@ Run the official [opencode](https://github.com/anomalyco/opencode) coding agent 
 | Web UI | Built-in WebView for the official `opencode web` interface; can hand off to an external browser |
 | Terminal | Shell-like command execution inside the container (cwd persists), quick commands; install log & runtime log, copyable and shareable |
 | Settings | API keys for 12 popular providers, default model, port, permission policy, low-memory mode, workspace, theme, maintenance tools |
+| Interface | **Chinese / English switch in-app** (System / 简体中文 / English, applies instantly); **Light / Dark / System** theme with a one-tap top-bar toggle; dynamic color (Android 12+) |
 | Workspace | A real folder on your phone (default `/sdcard/OpenCode`) is bind-mounted to `/root/workspace`; shared storage is **not** mounted by default |
 | Doctor | 12 read-only checks (architecture / runtime / rootfs / git / opencode / DNS / storage / ports / keys / permissions …), one-tap copy of the report |
 | Device shell bridge | Optional, via **Shizuku**: the in-container agent can run commands on the phone itself with `dexec` — with a dangerous-command guard and an audit log |
@@ -63,7 +64,7 @@ Run the official [opencode](https://github.com/anomalyco/opencode) coding agent 
 1. Download the APK from [Releases](https://github.com/evilqin/opencode-pocket/releases).
 2. Install it, open the app → "Install" → pick a mirror → wait ~5 minutes.
 
-> Three builds are published (current: 1.4.0):
+> Three builds are published (current: 1.5.0):
 > `*-arm64.apk` — standard, unminified, most stable (recommended);
 > `*-arm64-slim.apk` — R8-minified, ~4 MB, needs an on-device smoke test;
 > `*-debug.apk` — debug build, most verbose logs.
@@ -77,7 +78,7 @@ git clone https://github.com/evilqin/opencode-pocket.git && cd opencode-pocket
 node tools/fetch-boot-runtime.mjs
 
 # 2) unit tests + build
-./gradlew :app:testDebugUnitTest    # 161 pure-logic tests (parsing / config / versions / tar safety / diff / proot args / command guard)
+./gradlew :app:testDebugUnitTest    # 166 pure-logic tests (parsing / config / versions / upstream files / tar safety / diff / proot args / command guard / i18n)
 ./gradlew :app:assembleDebug        # output: app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assembleRelease      # debug-signed by default, installable as-is
 
@@ -182,7 +183,7 @@ Notes from the trenches (things that bit us):
 
 What is already proven on a dev machine (Windows + JDK 25 + Gradle 9.5 + AGP 9.3.3):
 
-- **161 JVM unit tests**, all green — server JSON parsing (samples written from the official
+- **166 JVM unit tests**, all green — server JSON parsing (samples written from the official
   `types.gen.d.ts`), `opencode.json` generation, environment mapping, version comparison
   (including `24.04.10 > 24.04.9`), upstream file parsing, Markdown, install-state merging,
   SSE parsing, settings codec, digests & file ops, tar safety boundaries (with real sym- and hard links),
@@ -229,7 +230,7 @@ Still needs a real device (outside CI's reach):
 
 ### On-device acceptance checklist
 
-After installing 1.4.0, this order is the fastest way through it (if something fails, send Settings → Export logs):
+After installing 1.5.0, this order is the fastest way through it (if something fails, send Settings → Export logs):
 
 1. **Environment** — Setup → "Test all mirrors" → "Install" → all 4 steps pass (watch step 3 `apt` and step 4 `opencode`);
 2. **Service** — Home → "Start service" → status turns green, notification shows up;
@@ -239,11 +240,26 @@ After installing 1.4.0, this order is the fastest way through it (if something f
 6. **Terminal** — `opencode --version`, `git --version`, `cd /root/workspace && ls`;
 7. **Web UI** — Home → "Open Web UI" → the official opencode interface;
 8. **Device bridge (optional)** — enable Device Shell in Settings (install & authorize Shizuku first) → `dexec 'getprop ro.product.model'`;
-9. **Long run** — a 10+ minute agent task; check notification status, progress and "Stop".
+9. **Language / theme** — Settings → Appearance → switch to English, then Light / Dark; the whole UI and notification update instantly;
+10. **Long run** — a 10+ minute agent task; check notification status, progress and "Stop".
 
 ---
 
 ## Release highlights
+
+### 1.5.0 (full list in [CHANGELOG](CHANGELOG.md))
+
+- **English UI**: every screen — setup, chat, terminal, diagnostics, settings, notifications — is bilingual;
+  Settings → Appearance → Language switches System / 简体中文 / English **instantly, no restart**.
+- **Light / dark mode**: follows the system by default, with Light / Dark / System in Settings and a one-tap
+  top-bar toggle; the light theme uses darker accent colors, a matching splash/window background, and
+  automatically flips status/navigation bar icon contrast.
+- **Fixes**: WebView kept using an old server password after rotation; the web screen drew under the status
+  bar; mirror speed tests could stick on "Testing…"; disk I/O during composition in Setup/Terminal; a race
+  between chat history loading and live SSE events; the composer could stay in "Stop" after `session.error`;
+  duplicate LazyColumn keys in the diff list; invalid port input was silently discarded.
+- **Polish**: initialization always finishes even if a step throws; OkHttp 5 nullability cleanup; unused
+  imports removed; tests 161 → 166.
 
 ### 1.4.0 (full list in [CHANGELOG](CHANGELOG.md))
 
@@ -357,7 +373,7 @@ app/src/main/java/dev/pocket/opencode/
 app/src/main/aidl/                 Binder interface for the Shizuku user service (incl. reserved destroy)
 app/src/main/assets/scripts/       shell scripts executed inside the container (apt, tools, profile)
 app/src/main/assets/device-shell/  the dexec command + device-shell skill template
-app/src/test/                      161 JVM unit tests
+app/src/test/                      166 JVM unit tests
 tools/fetch-boot-runtime.mjs       fetch & verify Termux proot runtime into jniLibs
 tools/verify-apk.mjs               APK self-check: ELFs, ABI, scripts, manifest, Shizuku classes
 tools/mirror-check.mjs             mirror health check: 25 endpoints verified with real requests

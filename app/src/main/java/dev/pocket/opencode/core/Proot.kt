@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import android.content.Context
 import android.system.Os
 import java.io.File
@@ -23,8 +25,8 @@ class Proot(
 
     /** 把 jniLibs 里的依赖复制成正确的 SONAME 文件名（幂等）。 */
     fun stageBootRuntime() {
-        require(paths.prootBin.isFile) { "内置运行时缺失：${paths.prootBin.name}（请重新安装 APK）" }
-        require(paths.prootLoader.isFile) { "内置 loader 缺失：${paths.prootLoader.name}（请重新安装 APK）" }
+        require(paths.prootBin.isFile) { t("内置运行时缺失：${paths.prootBin.name}（请重新安装 APK）", "Bundled runtime is missing: ${paths.prootBin.name} (reinstall the APK)") }
+        require(paths.prootLoader.isFile) { t("内置 loader 缺失：${paths.prootLoader.name}（请重新安装 APK）", "Bundled loader is missing: ${paths.prootLoader.name} (reinstall the APK)") }
         // 这两个是可执行文件：系统解压出来的通常已经带 x 位，chmod 失败不该让安装失败
         runCatching { Os.chmod(paths.prootBin.absolutePath, 0b111_101_101) }
         runCatching { Os.chmod(paths.prootLoader.absolutePath, 0b111_101_101) }

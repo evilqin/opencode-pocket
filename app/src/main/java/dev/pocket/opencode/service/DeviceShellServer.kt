@@ -1,5 +1,7 @@
 package dev.pocket.opencode.service
 
+import dev.pocket.opencode.i18n.t
+
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
@@ -209,7 +211,7 @@ class DeviceShellServer(
                     val blocked = try {
                         guard(command)
                     } catch (error: Exception) {
-                        "危险命令防护内部错误（已拦截）：${error.message ?: error::class.java.simpleName}"
+                        t("危险命令防护内部错误（已拦截）：${error.message ?: error::class.java.simpleName}", "Dangerous-command guard internal error (blocked): ${error.message ?: error::class.java.simpleName}")
                     }
                     if (blocked != null) {
                         onAudit("BLOCKED  ${sanitize(command)}   （${sanitize(blocked)}）")
@@ -220,7 +222,7 @@ class DeviceShellServer(
                             JSONObject()
                                 .put("error", "blocked-by-guard")
                                 .put("reason", blocked)
-                                .put("hint", "这条命令被危险命令防护拦下；请让用户在 App 内确认，或到设置里关闭防护")
+                                .put("hint", t("这条命令被危险命令防护拦下；请让用户在 App 内确认，或到设置里关闭防护", "This command was blocked by the dangerous-command guard. Ask the user to confirm in the app or disable the guard in Settings"))
                                 .toString(),
                         )
                     }
@@ -262,7 +264,7 @@ class DeviceShellServer(
                                 if (isNotEmpty() && !endsWith("\n")) append('\n')
                                 append(result.stderr.take(MAX_OUTPUT))
                             }
-                            if (result.timedOut) append("\n[命令超时，已被终止]\n")
+                            if (result.timedOut) append(t("\n[命令超时，已被终止]\n", "\n[Command timed out and was killed]\n"))
                         }
                         val status = when {
                             result.timedOut -> 504

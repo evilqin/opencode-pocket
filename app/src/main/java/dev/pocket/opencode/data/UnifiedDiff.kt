@@ -1,5 +1,7 @@
 package dev.pocket.opencode.data
 
+import dev.pocket.opencode.i18n.t
+
 /**
  * 统一差分（unified diff）：给「本次改动」视图用。
  *
@@ -40,7 +42,7 @@ object UnifiedDiff {
         val b = splitLines(after)
         if (a.size > MAX_LINES || b.size > MAX_LINES) {
             return listOf(
-                Line.Note("文件太大（${a.size} -> ${b.size} 行），这里只显示摘要；完整内容请用编辑器或 git diff 查看"),
+                Line.Note(t("文件太大（${a.size} -> ${b.size} 行），这里只显示摘要；完整内容请用编辑器或 git diff 查看", "File is too large (${a.size} -> ${b.size} lines); only a summary is shown. Use an editor or git diff for the full content")),
             )
         }
 

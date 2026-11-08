@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import android.content.Context
 import android.system.Os
 import dev.pocket.opencode.service.DeviceShellServer
@@ -40,7 +42,7 @@ class DeviceShellManager(
         val running: Boolean = false,
         val port: Int = DEFAULT_PORT,
         val identity: String? = null,
-        val message: String = "未开启",
+        val message: String = t("未开启", "Off"),
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -82,10 +84,10 @@ class DeviceShellManager(
                 port = config.deviceShellPort,
                 identity = null,
                 message = when {
-                    !config.deviceShell -> "未开启"
-                    !available -> "Shizuku 没有在运行（先启动 Shizuku，再用无线调试或 root 启动）"
-                    else -> "等待 Shizuku 授权"
-                } + if (problems.isEmpty()) "" else "（容器文件写入失败：${problems.first()}）",
+                    !config.deviceShell -> t("未开启", "Off")
+                    !available -> t("Shizuku 没有在运行（先启动 Shizuku，再用无线调试或 root 启动）", "Shizuku is not running (start Shizuku via wireless debugging or root)")
+                    else -> t("等待 Shizuku 授权", "Waiting for Shizuku permission")
+                } + if (problems.isEmpty()) "" else t("（容器文件写入失败：${problems.first()}）", " (failed to write container files: ${problems.first()})"),
             )
             return
         }
@@ -119,7 +121,7 @@ class DeviceShellManager(
                     granted = granted,
                     running = false,
                     port = config.deviceShellPort,
-                    message = "端口 ${config.deviceShellPort} 启动失败：${error.message}",
+                    message = t("端口 ${config.deviceShellPort} 启动失败：${error.message}", "Failed to start on port ${config.deviceShellPort}: ${error.message}"),
                 )
                 // 端口没起来就不要把容器里的配置写成“可用”
                 writeContainerFiles(enabled = false, config = config, token = token)
@@ -136,21 +138,26 @@ class DeviceShellManager(
             port = server?.listeningPort ?: config.deviceShellPort,
             identity = identity,
             message = buildString {
-                append("运行中 · 身份 ${identity ?: "?"} · 127.0.0.1:${server?.listeningPort ?: config.deviceShellPort}")
-                append(if (config.deviceShellGuard) " · 危险命令防护已开启" else " · 防护已关闭")
-                if (problems.isNotEmpty()) append("（容器文件写入失败：${problems.first()}）")
+                append(
+                    t(
+                        "运行中 · 身份 ${identity ?: "?"} · 127.0.0.1:${server?.listeningPort ?: config.deviceShellPort}",
+                        "Running · identity ${identity ?: "?"} · 127.0.0.1:${server?.listeningPort ?: config.deviceShellPort}",
+                    ),
+                )
+                append(if (config.deviceShellGuard) t(" · 危险命令防护已开启", " · dangerous-command guard enabled") else t(" · 防护已关闭", " · guard disabled"))
+                if (problems.isNotEmpty()) append(t("（容器文件写入失败：${problems.first()}）", " (failed to write container files: ${problems.first()})"))
             },
         )
     }
 
     /** 在容器里跑一次测试命令，返回可直接展示的结果。 */
     suspend fun testCommand(): String {
-        if (!shizuku.permissionGranted()) return "Shizuku 未授权"
+        if (!shizuku.permissionGranted()) return t("Shizuku 未授权", "Shizuku not authorized")
         val result = shizuku.exec("id; getprop ro.product.model; uname -a", timeoutMs = 15_000)
         return buildString {
             append(result.stdout.trim())
             if (result.stderr.isNotBlank()) append("\n").append(result.stderr.trim())
-            append("\n(exit=${result.exitCode}${if (result.timedOut) " 超时" else ""})")
+            append(t("\n(exit=${result.exitCode}${if (result.timedOut) " 超时" else ""})", "\n(exit=${result.exitCode}${if (result.timedOut) " timed out" else ""})"))
         }
     }
 
@@ -196,7 +203,7 @@ class DeviceShellManager(
 
     /** 把容器里的三份文件写成与当前状态一致；返回失败原因（空表示都写好了）。 */
     private suspend fun writeContainerFiles(enabled: Boolean, config: AppSettings, token: String): List<String> {
-        if (!paths.rootfsLooksInstalled()) return listOf("容器还没安装")
+        if (!paths.rootfsLooksInstalled()) return listOf(t("容器还没安装", "Container is not installed"))
         val failures = mutableListOf<String>()
         // 注意：rootfs 是容器的 /，而 opencode 读的是 /root/.config/opencode
         val configDir = File(paths.rootfs, "root/.config/opencode")

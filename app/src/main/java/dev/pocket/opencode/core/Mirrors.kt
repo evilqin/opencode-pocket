@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.I18n
+
 /**
  * 镜像目录。
  *
@@ -18,7 +20,38 @@ object Mirrors {
         /** 基础地址；Ubuntu 源指向“目录”，Node 源指向 index.json 所在目录。 */
         val base: String,
         val region: String = "",
-    )
+    ) {
+        /** 当前语言下的展示名（不要在对象初始化时调用 t()，否则语言会被锁死）。 */
+        val displayName: String
+            get() = I18n.t(
+                name,
+                when (name) {
+                    "清华 TUNA" -> "Tsinghua TUNA"
+                    "中科大 USTC" -> "USTC"
+                    "南京大学" -> "Nanjing University"
+                    "北外 BFSU" -> "BFSU"
+                    "教育网" -> "CERNET"
+                    "阿里云" -> "Aliyun"
+                    "华为云" -> "Huawei Cloud"
+                    "腾讯云" -> "Tencent Cloud"
+                    "浙江大学" -> "Zhejiang University"
+                    "Ubuntu 官方" -> "Ubuntu official"
+                    "Node 官方" -> "Node official"
+                    "npm 官方" -> "npm official"
+                    else -> name
+                },
+            )
+
+        val displayRegion: String
+            get() = I18n.t(
+                region,
+                when (region) {
+                    "国内" -> "China"
+                    "海外" -> "Global"
+                    else -> region
+                },
+            )
+    }
 
     /** Ubuntu base rootfs（aarch64）。 */
     val ubuntu = listOf(

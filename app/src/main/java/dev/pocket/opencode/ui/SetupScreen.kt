@@ -1,12 +1,13 @@
 package dev.pocket.opencode.ui
 
+import dev.pocket.opencode.i18n.t
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -16,7 +17,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -34,21 +34,21 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.pocket.opencode.core.InstallStep
 import dev.pocket.opencode.core.Mirrors
 import dev.pocket.opencode.core.PocketEngine
 import dev.pocket.opencode.core.Repos
 import dev.pocket.opencode.core.StepState
+import dev.pocket.opencode.i18n.t
 import dev.pocket.opencode.ui.components.HeroCard
 import dev.pocket.opencode.ui.components.InlineBanner
 import dev.pocket.opencode.ui.components.LabeledProgress
@@ -56,15 +56,18 @@ import dev.pocket.opencode.ui.components.LogConsole
 import dev.pocket.opencode.ui.components.PocketCard
 import dev.pocket.opencode.ui.components.SectionHeader
 import dev.pocket.opencode.ui.components.StatusPill
-import dev.pocket.opencode.ui.theme.PocketColors
+import dev.pocket.opencode.ui.theme.LocalPocketAccents
 import dev.pocket.opencode.util.Format
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
     val install by engine.installer.state.collectAsStateWithLifecycle()
     val settings by engine.settings.settings.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val accents = LocalPocketAccents.current
 
     val logs = remember { mutableStateListOf<String>() }
     LaunchedEffect(Unit) {
@@ -79,6 +82,12 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
     var showLogs by remember { mutableStateOf(false) }
     var speedResults by remember { mutableStateOf<Map<String, Repos.Speed>>(emptyMap()) }
     var testing by remember { mutableStateOf(false) }
+    // 磁盘探测会 stat 文件系统：放到 IO 线程，别在组合期卡主线程
+    val space by produceState<Pair<Boolean, Long>?>(null, install.installed, install.running) {
+        value = withContext(Dispatchers.IO) {
+            engine.installer.hasEnoughSpace() to engine.installer.freeSpaceBytes()
+        }
+    }
 
     val doneCount = install.steps.count { it.state == StepState.DONE }
     val totalCount = install.steps.size
@@ -90,24 +99,24 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         item {
-            HeroCard(accent = if (install.installed) PocketColors.Emerald else PocketColors.Cyan) {
+            HeroCard(accent = if (install.installed) accents.emerald else accents.cyan) {
                 Text("环境安装", style = MaterialTheme.typography.headlineSmall)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    if (install.installed) "全部就绪，可以开始使用了"
-                    else "四步装好一台口袋里的 Linux：rootfs → 基础工具 → Node（可选）→ OpenCode",
+                    if (install.installed) t("全部就绪，可以开始使用了", "Everything is ready")
+                    else t("四步装好一台口袋里的 Linux：rootfs → 基础工具 → Node（可选）→ OpenCode", "A pocket Linux in four steps: rootfs → base tools → Node (optional) → OpenCode"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(14.dp))
                 if (running) {
                     LabeledProgress(
-                        label = install.running?.title ?: "",
+                        label = install.running?.titleText ?: "",
                         fraction = install.steps.firstOrNull { it.step == install.running }?.progress ?: 0f,
                         detail = install.message,
                     )
                     Spacer(Modifier.height(12.dp))
-                    OutlinedButton(onClick = { engine.installer.cancel() }) { Text("取消") }
+                    OutlinedButton(onClick = { engine.installer.cancel() }) { Text(t("取消", "Cancel")) }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
@@ -116,16 +125,16 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                         ) {
                             Icon(PocketIcons.Bolt, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text(if (doneCount == 0) "一键安装" else "继续安装（$doneCount/$totalCount）")
+                            Text(if (doneCount == 0) t("一键安装", "Install all") else t("继续安装（$doneCount/$totalCount）", "Continue ($doneCount/$totalCount)"))
                         }
                         if (install.installed) {
-                            FilledTonalButton(onClick = onDone) { Text("开始使用") }
+                            FilledTonalButton(onClick = onDone) { Text(t("开始使用", "Start using")) }
                         }
                         if (doneCount > 0) {
                             TextButton(onClick = { scope.launch { engine.installer.refresh() } }) {
                                 Icon(Icons.Filled.Refresh, null, Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("重新检测")
+                                Text(t("重新检测", "Re-check"))
                             }
                         }
                     }
@@ -136,31 +145,36 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
         item {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    SectionHeader("镜像源", "国内直连，测速用真实文件", Modifier.weight(1f))
+                    SectionHeader(t("镜像源", "Mirrors"), t("国内直连，测速用真实文件", "Direct mirrors; speed test uses real files"), Modifier.weight(1f))
                     TextButton(
                         onClick = {
                             testing = true
                             scope.launch {
-                                val ubuntu = engine.repos.speedTestUbuntu(Mirrors.ubuntu)
-                                val node = engine.repos.speedTestNode(Mirrors.node)
-                                val npm = engine.repos.speedTestNpm(Mirrors.npm)
-                                // 用「类型:id」做 key：同一镜像名会同时出现在多个分组里（例如清华同时提供 ubuntu/apt/node/npm）
-                                speedResults = buildMap {
-                                    ubuntu.forEach { put("ubuntu:${it.mirrorId}", it) }
-                                    node.forEach { put("node:${it.mirrorId}", it) }
-                                    npm.forEach { put("npm:${it.mirrorId}", it) }
+                                try {
+                                    val ubuntu = engine.repos.speedTestUbuntu(Mirrors.ubuntu)
+                                    val node = engine.repos.speedTestNode(Mirrors.node)
+                                    val npm = engine.repos.speedTestNpm(Mirrors.npm)
+                                    // 用「类型:id」做 key：同一镜像名会同时出现在多个分组里（例如清华同时提供 ubuntu/apt/node/npm）
+                                    speedResults = buildMap {
+                                        ubuntu.forEach { put("ubuntu:${it.mirrorId}", it) }
+                                        node.forEach { put("node:${it.mirrorId}", it) }
+                                        npm.forEach { put("npm:${it.mirrorId}", it) }
+                                    }
+                                } catch (_: Exception) {
+                                    // 测速失败保留旧结果即可，至少把按钮恢复可点
+                                } finally {
+                                    testing = false
                                 }
-                                testing = false
                             }
                         },
                         enabled = !testing,
                     ) {
                         if (testing) {
-                            Text("测速中…")
+                            Text(t("测速中…", "Testing…"))
                         } else {
                             Icon(PocketIcons.Gauge, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("全线测速")
+                            Text(t("全线测速", "Test all mirrors"))
                         }
                     }
                 }
@@ -177,7 +191,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                     )
                     Spacer(Modifier.height(14.dp))
                     MirrorGroup(
-                        title = "apt 软件源",
+                        title = t("apt 软件源", "apt mirror"),
                         kind = "apt",
                         mirrors = Mirrors.apt,
                         selected = settings.aptMirror,
@@ -197,7 +211,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                     )
                     Spacer(Modifier.height(14.dp))
                     MirrorGroup(
-                        title = "npm registry（OpenCode 下载）",
+                        title = t("npm registry（OpenCode 下载）", "npm registry (OpenCode download)"),
                         kind = "npm",
                         mirrors = Mirrors.npm,
                         selected = settings.npmMirror,
@@ -210,7 +224,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
         }
 
         item {
-            SectionHeader("安装步骤", "每一步都可以单独重试")
+            SectionHeader(t("安装步骤", "Install steps"), t("每一步都可以单独重试", "Every step can be retried independently"))
         }
 
         items(install.steps, key = { it.step.id }) { snapshot ->
@@ -232,7 +246,7 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
                     )
                 }
                 Text(
-                    if (showLogs) "收起安装日志" else "查看安装日志",
+                    if (showLogs) t("收起安装日志", "Hide install log") else t("查看安装日志", "View install log"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -246,19 +260,22 @@ fun SetupScreen(engine: PocketEngine, onDone: () -> Unit) {
         item {
             InlineBanner(
                 icon = Icons.Filled.Warning,
-                title = "安装期间请保持 App 在前台",
-                body = "Android 可能会在后台清理下载进程；下载支持断点续传，中断后重新点一次即可继续。",
-                tone = PocketColors.Amber,
+                title = t("安装期间请保持 App 在前台", "Keep the app in the foreground while installing"),
+                body = t("Android 可能会在后台清理下载进程；下载支持断点续传，中断后重新点一次即可继续。", "Android may kill downloads in the background; downloads resume, so just tap again if interrupted."),
+                tone = accents.amber,
             )
         }
 
-        if (!install.installed && !engine.installer.hasEnoughSpace()) {
+        if (!install.installed && space?.first == false) {
             item {
                 InlineBanner(
                     icon = Icons.Filled.Warning,
-                    title = "存储空间可能不够",
-                    body = "完整环境（Ubuntu + OpenCode）大约需要 1.5 GB，建议预留 2 GB；当前可用 ${Format.bytes(engine.installer.freeSpaceBytes())}",
-                    tone = PocketColors.Rose,
+                    title = t("存储空间可能不够", "Storage may be insufficient"),
+                    body = t(
+                        "完整环境（Ubuntu + OpenCode）大约需要 1.5 GB，建议预留 2 GB；当前可用 ${Format.bytes(space?.second ?: 0L)}",
+                        "The full environment (Ubuntu + OpenCode) needs about 1.5 GB; 2 GB recommended. Available: ${Format.bytes(space?.second ?: 0L)}",
+                    ),
+                    tone = accents.rose,
                 )
             }
         }
@@ -285,7 +302,7 @@ private fun MirrorGroup(
             mirrors.forEach { mirror ->
                 val speed = speeds["$kind:${mirror.id}"]
                 val label = buildString {
-                    append(mirror.name)
+                    append(mirror.displayName)
                     when {
                         speed == null -> {}
                         speed.bytesPerSecond != null -> append(" ${Format.speed(speed.bytesPerSecond)}")
@@ -308,12 +325,13 @@ private fun StepCard(
     running: Boolean,
     onStart: () -> Unit,
 ) {
+    val accents = LocalPocketAccents.current
     val (tone, label) = when (snapshot.state) {
-        StepState.DONE -> PocketColors.Emerald to "已完成"
-        StepState.RUNNING -> PocketColors.Amber to "进行中"
-        StepState.FAILED -> PocketColors.Rose to "失败"
-        StepState.SKIPPED -> MaterialTheme.colorScheme.onSurfaceVariant to "已跳过"
-        StepState.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant to "待安装"
+        StepState.DONE -> accents.emerald to t("已完成", "Done")
+        StepState.RUNNING -> accents.amber to t("进行中", "Running")
+        StepState.FAILED -> accents.rose to t("失败", "Failed")
+        StepState.SKIPPED -> MaterialTheme.colorScheme.onSurfaceVariant to t("已跳过", "Skipped")
+        StepState.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant to t("待安装", "Pending")
     }
     PocketCard(contentPadding = 16.dp) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -330,9 +348,9 @@ private fun StepCard(
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(snapshot.step.title, style = MaterialTheme.typography.titleSmall)
+                Text(snapshot.step.titleText, style = MaterialTheme.typography.titleSmall)
                 Text(
-                    snapshot.detail.ifBlank { snapshot.step.subtitle },
+                    snapshot.detail.ifBlank { snapshot.step.subtitleText },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
@@ -368,10 +386,10 @@ private fun StepCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (snapshot.state != StepState.DONE) {
                     FilledTonalButton(onClick = onStart) {
-                        Text(if (snapshot.state == StepState.FAILED) "重试" else "开始这一步")
+                        Text(if (snapshot.state == StepState.FAILED) t("重试", "Retry") else t("开始这一步", "Start this step"))
                     }
                 } else {
-                    OutlinedButton(onClick = onStart) { Text("重装") }
+                    OutlinedButton(onClick = onStart) { Text(t("重装", "Reinstall")) }
                 }
             }
         }

@@ -33,6 +33,7 @@
 | Web UI | 内嵌 WebView 打开 `opencode web` 的官方界面，可跳外部浏览器 |
 | 终端 | 类 shell 的命令执行（cwd 保持），快捷命令；安装日志 / 运行日志各一份，可复制可分享 |
 | 设置 | 12 个常用 provider 的 API Key、默认模型、端口、权限策略、低内存模式、工作区、主题、维护工具 |
+| 界面 | **中文 / English 应用内切换**（跟随系统 / 简体中文 / English，立即生效）；**白天 / 黑夜 / 跟随系统**三档主题，顶栏一键切换；动态取色（Android 12+） |
 | 工作区 | 手机上的真实目录（默认 `/sdcard/OpenCode`）挂进容器 `/root/workspace`；共享存储默认**不**整体挂载 |
 | 一键体检 | 12 项只读检查（架构/运行时/rootfs/git/opencode/域名解析/空间/端口/密钥/权限…），结果可一键复制 |
 | 设备 Shell 桥 | 可选：通过 **Shizuku** 让容器里的 agent 用 `dexec` 在手机本体执行命令（含危险命令防护与审计日志） |
@@ -48,7 +49,7 @@
 2. 手机需要 **ARM64**，Android **11（API 30）及以上**。
 3. 安装后打开 → 「开始安装」→ 选镜像 → 等 5 分钟左右。
 
-> 三份构建产物都在 [Releases](../../releases) 里（当前 1.4.0）：
+> 三份构建产物都在 [Releases](../../releases) 里（当前 1.5.0）：
 > `*-arm64.apk`（标准包，未混淆，最稳）、
 > `*-arm64-slim.apk`（R8 精简包，约 4 MB，体积小但需要真机回归一遍）、
 > `*-debug.apk`（调试包，日志最全）。
@@ -62,7 +63,7 @@ git clone <this-repo> && cd opencode-pocket
 node tools/fetch-boot-runtime.mjs
 
 # 2) 单元测试 + 构建
-./gradlew :app:testDebugUnitTest    # 161 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / tar 安全 / 差分 / proot 参数 / 危险命令防护）
+./gradlew :app:testDebugUnitTest    # 166 个纯逻辑用例（解析 / 配置 / 版本 / 上游文件 / tar 安全 / 差分 / proot 参数 / 危险命令防护 / 多语言）
 ./gradlew :app:assembleDebug        # 产物：app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:assembleRelease      # 默认用 debug 签名，可直接安装
 
@@ -76,7 +77,7 @@ bash tools/ci-runtime-smoke.sh
 **发布新版本**：改 `app/build.gradle.kts` 里的 `versionCode` / `versionName`，然后推一个同名标签即可自动构建并发布 Release（CI 会先校验 tag 与 versionName 一致，并且**必须先通过容器冒烟测试**）：
 
 ```bash
-git tag v1.4.1 && git push origin v1.4.1
+git tag v1.5.0 && git push origin v1.5.0
 ```
 
 环境要求：JDK 21+、Android SDK（platform 37 + build-tools 36.0.0）、Node 20+（只用来跑取件脚本）。
@@ -164,7 +165,7 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 开发机上已经实际构建并通过以下检查（Windows + JDK 25 + Gradle 9.5 + AGP 9.3.3）：
 
-- **161 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
+- **166 个 JVM 单元测试**全绿：服务端 JSON 解析（照着官方 `types.gen.d.ts` 写样本）、
   `opencode.json` 生成、环境变量映射、版本比较（含 `24.04.10 > 24.04.9` 这种坑）、
   **上游文件解析（Node index.json 的 `files` 字段、Ubuntu 目录列表、SHA256SUMS 文本）**、
   Markdown 解析、格式化输出；以及**安装状态合并 / SSE 解析 / 设置编解码 / 摘要与文件操作 /
@@ -209,6 +210,17 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 - apt 在手机侧网络下装包、>60 分钟长跑与 SSE 泄漏、覆盖安装签名矩阵；
 - R8 精简包的功能回归（所以默认发布的还是未混淆版本）。
 
+## 1.5.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
+
+- **English UI**：界面、设置、安装向导、对话、终端、体检、通知全部支持英文；
+  设置 → 外观 → 界面语言可切「跟随系统 / 简体中文 / English」，**立即生效，无需重启**
+- **白天 / 黑夜模式**：默认跟随系统；设置里可选浅色/深色/跟随系统，顶栏新增一键切换按钮；
+  浅色主题使用加深后的强调色与独立的启动窗口背景，状态栏/导航栏图标随主题自动翻转
+- **修复**：WebView 重新生成口令后仍用旧口令；网页页在 edge-to-edge 下顶到状态栏；
+  测速异常后按钮永远卡在「测速中」；安装页/终端在组合期做磁盘 IO；对话历史加载与实时事件竞态；
+  `session.error` 后输入框卡在「停止」；差分列表重复 key 崩溃；端口对话框静默丢弃非法输入
+- **优化**：初始化异常也能结束（不再卡启动）；OkHttp 5 可空性清理；未使用导入清理；测试 161 → 166
+
 ## 1.4.0 重点（完整见 [CHANGELOG](CHANGELOG.md)）
 
 - **安全加固专项**（第四轮审查 13 条全部落地）：危险命令防护不可绕写（规范化 + 分段判定 +
@@ -238,7 +250,7 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 
 ### 手机端验收清单（下一步要做的）
 
-装了 1.4.0 之后，按这个顺序过一遍最省事（有问题就把「设置 → 导出日志」发我）：
+装了 1.5.0 之后，按这个顺序过一遍最省事（有问题就把「设置 → 导出日志」发我）：
 
 1. **安装环境**：安装页 →「全线测速」→「一键安装」→ 4 步都过（重点看第 3 步 `apt` 与第 4 步 `opencode`）；
 2. **服务**：首页 →「启动服务」→ 状态变绿，通知栏出现「OpenCode 服务」；
@@ -248,7 +260,8 @@ node tools/verify-apk.mjs app/build/outputs/apk/release/app-release.apk
 6. **终端**：终端页 `opencode --version`、`git --version`、`cd /root/workspace && ls`；
 7. **网页**：首页 →「打开网页」→ 应看到 opencode 官方 Web UI；
 8. **设备桥（可选）**：设置里开启设备 Shell（需装 Shizuku 并授权）→ 容器里 `dexec 'getprop ro.product.model'`；
-9. **长跑**：让 agent 跑一个 10 分钟以上的任务，看通知栏状态、进度与「停止」是否正常。
+9. **语言 / 主题**：设置 → 外观 → 切 English、切浅色/深色，确认整个界面与通知立即变化；
+10. **长跑**：让 agent 跑一个 10 分钟以上的任务，看通知栏状态、进度与「停止」是否正常。
 
 ## 1.2.0 重点
 
@@ -325,7 +338,7 @@ app/src/main/java/dev/pocket/opencode/
 app/src/main/aidl/            Shizuku 用户服务的 Binder 接口（含 destroy 保留事务）
 app/src/main/assets/scripts/  容器内执行的 shell 脚本（apt、工具、收尾）
 app/src/main/assets/device-shell/  dexec 命令与 device-shell 技能模板
-app/src/test/                 161 个 JVM 单元测试（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化）
+app/src/test/                 166 个 JVM 单元测试（解析 / 配置 / 版本 / 上游文件 / Markdown / 格式化 / 多语言）
 tools/fetch-boot-runtime.mjs  拉取 Termux 官方 proot 运行时并校验，落到 jniLibs
 tools/verify-apk.mjs          打包自检：内置 ELF 是否被改、ABI、容器脚本、manifest、Shizuku 类
 tools/mirror-check.mjs        镜像源体检：25 个端点用真实请求逐个验证

@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -76,7 +78,7 @@ class Repos(private val downloads: Downloader) {
                 return@withContext Artifact(url, fallback, version, size, digest)
             }
         }
-        throw IllegalStateException("镜像 ${mirror.name} 上找不到 ubuntu-base 24.04 arm64")
+        throw IllegalStateException(t("镜像 ${mirror.displayName} 上找不到 ubuntu-base 24.04 arm64", "ubuntu-base 24.04 arm64 not found on ${mirror.displayName}"))
     }
 
     /** Ubuntu 官方/镜像目录里的 SHA256SUMS。 */
@@ -89,7 +91,7 @@ class Repos(private val downloads: Downloader) {
     suspend fun nodeLts(mirror: Mirrors.Mirror): Artifact = withContext(Dispatchers.IO) {
         val index = httpGetText(mirror.base + "/index.json")
         val pick = UpstreamParsers.pickNodeLts(index)
-            ?: throw IllegalStateException("镜像 ${mirror.name} 的 index.json 里没有带 arm64 的 LTS")
+            ?: throw IllegalStateException(t("镜像 ${mirror.displayName} 的 index.json 里没有带 arm64 的 LTS", "No arm64 LTS build in ${mirror.displayName}'s index.json"))
         val fileName = "node-${pick.version}-linux-arm64.tar.xz"
         val url = "${mirror.base}/${pick.version}/$fileName"
         Artifact(
@@ -110,7 +112,7 @@ class Repos(private val downloads: Downloader) {
 
     suspend fun opencodeVersion(registry: String): String = withContext(Dispatchers.IO) {
         val text = httpGetText("$registry/opencode-ai/latest")
-        JSONObject(text).optString("version").ifBlank { throw IllegalStateException("registry 没有返回版本号") }
+        JSONObject(text).optString("version").ifBlank { throw IllegalStateException(t("registry 没有返回版本号", "Registry did not return a version")) }
     }
 
     fun opencodeTarball(registry: String, version: String): Artifact {
@@ -154,7 +156,7 @@ class Repos(private val downloads: Downloader) {
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (error: Exception) {
-                            Speed(mirror.id, mirror.name, null, null, null, error.message)
+                            Speed(mirror.id, mirror.displayName, null, null, null, error.message)
                         }
                     }
                 }
@@ -177,7 +179,7 @@ class Repos(private val downloads: Downloader) {
             var total = 0L
             downloads.http.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code}")
-                val stream = response.body?.byteStream() ?: throw IllegalStateException("空响应")
+                val stream = response.body.byteStream()
                 val buffer = ByteArray(64 * 1024)
                 while (true) {
                     val count = stream.read(buffer)
@@ -190,11 +192,11 @@ class Repos(private val downloads: Downloader) {
             val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
             val transferMs = ((System.nanoTime() - firstByteNs) / 1_000_000).coerceAtLeast(1)
             val latency = if (firstByteNs > 0) (firstByteNs - startNs) / 1_000_000 else elapsedMs
-            Speed(mirror.id, mirror.name, latency, total * 1000L / transferMs, url)
+            Speed(mirror.id, mirror.displayName, latency, total * 1000L / transferMs, url)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            Speed(mirror.id, mirror.name, null, null, url, error.message)
+            Speed(mirror.id, mirror.displayName, null, null, url, error.message)
         }
     }
 
@@ -239,7 +241,7 @@ class Repos(private val downloads: Downloader) {
             .build()
             .newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IllegalStateException("HTTP ${response.code} @ $url")
-                response.body?.string() ?: throw IllegalStateException("空响应 @ $url")
+                response.body.string()
             }
     }
 }

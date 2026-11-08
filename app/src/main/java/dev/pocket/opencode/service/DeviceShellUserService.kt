@@ -1,5 +1,7 @@
 package dev.pocket.opencode.service
 
+import dev.pocket.opencode.i18n.t
+
 import android.content.Context
 import dev.pocket.opencode.IDeviceShellService
 import java.io.BufferedReader
@@ -46,7 +48,7 @@ class DeviceShellUserService @JvmOverloads constructor(
                 return JSONObject()
                     .put("exitCode", -1)
                     .put("stdout", "")
-                    .put("stderr", "无法启动进程：${error.message}")
+                    .put("stderr", t("无法启动进程：${error.message}", "Could not start the process: ${error.message}"))
                     .put("timedOut", false)
                     .toString()
             }

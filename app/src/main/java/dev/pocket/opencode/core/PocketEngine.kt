@@ -3,6 +3,8 @@ package dev.pocket.opencode.core
 import android.content.Context
 import android.content.Intent
 import dev.pocket.opencode.data.OpencodeApi
+import dev.pocket.opencode.i18n.I18n
+import dev.pocket.opencode.service.Notifications
 import dev.pocket.opencode.service.ServerService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -38,14 +40,21 @@ class PocketEngine(context: Context) {
     val initialized: StateFlow<Boolean> = _initialized.asStateFlow()
 
     suspend fun initialize() {
-        settings.load()
-        // 本机服务必须有口令：首启就生成，避免出现「无认证窗口期」
-        runCatching { settings.ensureServerPassword() }
-        installer.refresh()
-        // 设备桥的 sync 会去 spawn/连接 Shizuku 用户服务（最长几秒），
-        // 这里不要 await，免得拖慢冷启动；状态会自己刷新到 UI
-        deviceShell.sync()
-        _initialized.value = true
+        try {
+            settings.load()
+            // 设置读出来后立刻应用用户选择的界面语言（通知等非 Compose 代码也依赖它）
+            I18n.mode = settings.settings.value.language
+            Notifications.ensureChannels(appContext)
+            // 本机服务必须有口令：首启就生成，避免出现「无认证窗口期」
+            runCatching { settings.ensureServerPassword() }
+            installer.refresh()
+            // 设备桥的 sync 会去 spawn/连接 Shizuku 用户服务（最长几秒），
+            // 这里不要 await，免得拖慢冷启动；状态会自己刷新到 UI
+            deviceShell.sync()
+        } finally {
+            // 任何一步失败都不能让 UI 永远停在「初始化中」
+            _initialized.value = true
+        }
     }
 
     fun startServer(restart: Boolean = false) {

@@ -1,5 +1,7 @@
 package dev.pocket.opencode.ui
 
+import dev.pocket.opencode.i18n.t
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,7 +37,7 @@ import androidx.compose.ui.unit.dp
 import dev.pocket.opencode.core.Doctor
 import dev.pocket.opencode.core.PocketEngine
 import dev.pocket.opencode.ui.components.copyToClipboard
-import dev.pocket.opencode.ui.theme.PocketColors
+import dev.pocket.opencode.ui.theme.LocalPocketAccents
 import kotlinx.coroutines.launch
 
 /**
@@ -46,6 +48,7 @@ import kotlinx.coroutines.launch
 fun DoctorDialog(engine: PocketEngine, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val accents = LocalPocketAccents.current
     val results = remember { mutableStateListOf<Doctor.Check>() }
     var running by remember { mutableStateOf(false) }
 
@@ -54,8 +57,13 @@ fun DoctorDialog(engine: PocketEngine, onDismiss: () -> Unit) {
         running = true
         results.clear()
         scope.launch {
-            engine.doctor.run { check -> results.add(check) }
-            running = false
+            try {
+                engine.doctor.run { check -> results.add(check) }
+            } catch (_: Exception) {
+                // 单项检查内部已有兜底；这里防的是列表本身被取消/异常，避免永远停在“正在检查”
+            } finally {
+                running = false
+            }
         }
     }
 
@@ -68,19 +76,19 @@ fun DoctorDialog(engine: PocketEngine, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         title = {
             Column {
-                Text("一键体检")
+                Text(t("一键体检", "Diagnostics"))
                 Text(
                     when {
-                        running -> "正在检查…"
-                        failures > 0 -> "$failures 项需要处理"
-                        warnings > 0 -> "$warnings 项建议处理"
-                        else -> "一切正常"
+                        running -> t("正在检查…", "Checking…")
+                        failures > 0 -> t("$failures 项需要处理", "$failures issues need attention")
+                        warnings > 0 -> t("$warnings 项建议处理", "$warnings warnings")
+                        else -> t("一切正常", "All good")
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = when {
                         failures > 0 -> MaterialTheme.colorScheme.error
-                        warnings > 0 -> PocketColors.Amber
-                        else -> PocketColors.Emerald
+                        warnings > 0 -> accents.amber
+                        else -> accents.emerald
                     },
                 )
             }
@@ -103,7 +111,7 @@ fun DoctorDialog(engine: PocketEngine, onDismiss: () -> Unit) {
                             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(10.dp))
                             Text(
-                                "正在执行下一项检查…",
+                                t("正在执行下一项检查…", "Running next check…"),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -116,22 +124,23 @@ fun DoctorDialog(engine: PocketEngine, onDismiss: () -> Unit) {
             Row {
                 TextButton(onClick = {
                     val report = results.joinToString("\n") { "${it.status}  ${it.title}：${it.detail}" }
-                    copyToClipboard(context, report, "体检报告已复制")
-                }) { Text("复制报告") }
-                TextButton(onClick = { start() }) { Text("重新检查") }
+                    copyToClipboard(context, report, t("体检报告已复制", "Report copied"))
+                }) { Text(t("复制报告", "Copy report")) }
+                TextButton(onClick = { start() }) { Text(t("重新检查", "Re-check")) }
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(t("关闭", "Close")) } },
     )
 }
 
 @Composable
 private fun DoctorRow(check: Doctor.Check) {
+    val accents = LocalPocketAccents.current
     val (tone, icon) = when (check.status) {
-        Doctor.Status.OK -> PocketColors.Emerald to Icons.Filled.Check
-        Doctor.Status.WARN -> PocketColors.Amber to Icons.Filled.Warning
-        Doctor.Status.FAIL -> PocketColors.Rose to Icons.Filled.Warning
-        Doctor.Status.INFO -> PocketColors.Cyan to Icons.Filled.Info
+        Doctor.Status.OK -> accents.emerald to Icons.Filled.Check
+        Doctor.Status.WARN -> accents.amber to Icons.Filled.Warning
+        Doctor.Status.FAIL -> accents.rose to Icons.Filled.Warning
+        Doctor.Status.INFO -> accents.cyan to Icons.Filled.Info
         Doctor.Status.SKIP -> MaterialTheme.colorScheme.onSurfaceVariant to Icons.Filled.Info
     }
     Row(Modifier.fillMaxWidth()) {

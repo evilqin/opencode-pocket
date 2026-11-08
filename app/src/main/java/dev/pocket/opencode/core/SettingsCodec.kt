@@ -40,6 +40,7 @@ object SettingsCodec {
         json.put("smallModel", value.smallModel)
         json.put("themeMode", value.themeMode)
         json.put("dynamicColor", value.dynamicColor)
+        json.put("language", value.language)
         json.put("notificationAsked", value.notificationAsked)
         json.put("autoStartOnBoot", value.autoStartOnBoot)
         return json.toString()
@@ -79,6 +80,7 @@ object SettingsCodec {
                 smallModel = json.optString("smallModel", defaults.smallModel),
                 themeMode = json.optString("themeMode", defaults.themeMode),
                 dynamicColor = json.optBoolean("dynamicColor", defaults.dynamicColor),
+                language = json.optString("language", defaults.language),
                 notificationAsked = json.optBoolean("notificationAsked", defaults.notificationAsked),
                 autoStartOnBoot = json.optBoolean("autoStartOnBoot", defaults.autoStartOnBoot),
             )

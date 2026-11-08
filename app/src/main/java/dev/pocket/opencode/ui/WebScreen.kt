@@ -1,5 +1,7 @@
 package dev.pocket.opencode.ui
 
+import dev.pocket.opencode.i18n.t
+
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Bitmap
@@ -9,6 +11,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.core.net.toUri
 import java.io.ByteArrayInputStream
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
@@ -19,8 +22,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -38,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +69,8 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
     var failed by remember { mutableStateOf<String?>(null) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var reloadToken by remember { mutableIntStateOf(0) }
+    // 口令可能在 WebView 存活期间被「重新生成」：不能用 factory 里捕获一次的旧值
+    val currentPassword = rememberUpdatedState(appSettings.serverPassword)
 
     BackHandler {
         val view = webView
@@ -84,7 +92,7 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
         Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
             Row(
                 Modifier
@@ -93,7 +101,7 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, t("返回", "Back"))
                 }
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -118,17 +126,17 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                     }
                 }
                 IconButton(onClick = { reloadToken++ }) {
-                    Icon(Icons.Filled.Refresh, "刷新")
+                    Icon(Icons.Filled.Refresh, t("刷新", "Refresh"))
                 }
                 IconButton(onClick = {
                     runCatching {
                         context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:${server.port}/"))
+                            Intent(Intent.ACTION_VIEW, "http://127.0.0.1:${server.port}/".toUri())
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                         )
                     }
                 }) {
-                    Icon(PocketIcons.External, "用浏览器打开")
+                    Icon(PocketIcons.External, t("用浏览器打开", "Open in browser"))
                 }
             }
         }
@@ -147,10 +155,10 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     EmptyState(
                         icon = PocketIcons.Globe,
-                        title = "服务未在运行",
-                        body = server.error ?: "先在首页启动 OpenCode 服务，这里的网页界面就会连上。",
+                        title = t("服务未在运行", "Server is not running"),
+                        body = server.error ?: t("先在首页启动 OpenCode 服务，这里的网页界面就会连上。", "Start the OpenCode server from Home and this web UI will connect."),
                         action = {
-                            Button(onClick = { engine.startServer() }) { Text("启动服务") }
+                            Button(onClick = { engine.startServer() }) { Text(t("启动服务", "Start server")) }
                         },
                     )
                 }
@@ -164,15 +172,11 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                             WebView(ctx).apply {
                                 settings.javaScriptEnabled = true
                                 settings.domStorageEnabled = true
-                                settings.databaseEnabled = true
                                 settings.allowFileAccess = false
                                 settings.allowContentAccess = false
-                                settings.setAllowFileAccessFromFileURLs(false)
-                                settings.setAllowUniversalAccessFromFileURLs(false)
                                 settings.mediaPlaybackRequiresUserGesture = false
                                 settings.setSupportZoom(false)
                                 settings.textZoom = 100
-                                val password = appSettings.serverPassword
                                 webView = this
                                 webViewClient = object : WebViewClient() {
                                     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -189,7 +193,10 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                                         error: WebResourceError?,
                                     ) {
                                         if (request?.isForMainFrame == true) {
-                                            failed = "页面加载失败：${error?.description ?: "未知错误"}"
+                                            failed = t(
+                                                "页面加载失败：${error?.description ?: "未知错误"}",
+                                                "Page failed to load: ${error?.description ?: "Unknown error"}",
+                                            )
                                         }
                                     }
 
@@ -239,8 +246,9 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                                         // 但只认 host 远远不够：同机任意 App 都能在回环上开端口并回 401+Basic 骗口令，
                                         // 所以必须同时确认请求来自「当前服务端口」才回填，其余一律取消。
                                         val requestPort = view?.url
-                                            ?.let { runCatching { Uri.parse(it).port }.getOrDefault(-1) }
+                                            ?.let { runCatching { it.toUri().port }.getOrDefault(-1) }
                                             ?: -1
+                                        val password = currentPassword.value
                                         if (password.isNotBlank() &&
                                             isLoopbackHost(host) &&
                                             requestPort == server.port
@@ -276,13 +284,13 @@ fun WebScreen(engine: PocketEngine, onBack: () -> Unit) {
                         ) {
                             EmptyState(
                                 icon = PocketIcons.Globe,
-                                title = "加载失败",
+                                title = t("加载失败", "Failed to load"),
                                 body = failed ?: "",
                                 action = {
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Button(onClick = { reloadToken++ }) { Text("重试") }
+                                        Button(onClick = { reloadToken++ }) { Text(t("重试", "Retry")) }
                                         Button(onClick = { engine.startServer(restart = true) }) {
-                                            Text("重启服务")
+                                            Text(t("重启服务", "Restart server"))
                                         }
                                     }
                                 },

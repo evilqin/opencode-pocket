@@ -1,5 +1,7 @@
 package dev.pocket.opencode.core
 
+import dev.pocket.opencode.i18n.t
+
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -40,7 +42,7 @@ class GuestShell(private val proot: Proot) {
     }
 
     class TimeoutException(val partial: List<String>) :
-        Exception("命令超时（已强制结束）")
+        Exception(t("命令超时（已强制结束）", "Command timed out (killed)"))
 
     /**
      * @param keepLastLines 只保留最后 N 行（默认 4000），再多就丢掉最老的并计数
@@ -129,7 +131,7 @@ class GuestShell(private val proot: Proot) {
             }
         }
 
-        if (cancelled) throw CancellationException("命令已取消")
+        if (cancelled) throw CancellationException(t("命令已取消", "Command cancelled"))
         if (timedOut) throw TimeoutException(lines.toList())
         return Output(
             exitCode = runCatching { process.exitValue() }.getOrDefault(-1),
